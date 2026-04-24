@@ -1,0 +1,56 @@
+name: Publish release tarball
+
+# Builds a tarball of the agent on every push to main (and on tag) and
+# uploads it to the Ergora marketing server so the install script keeps
+# pointing at the latest code.
+#
+# Required repo secrets:
+#   ERGORA_VPS_HOST      — e.g. 187.124.209.30
+#   ERGORA_VPS_USER      — usually 'root'
+#   ERGORA_VPS_SSH_KEY   — private SSH key with access to VPS
+#   ERGORA_VPS_PATH      — /docker/ergora-app/public/downloads
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install + typecheck (sanity)
+        run: |
+          npm ci --silent
+          npx tsc --noEmit
+
+      - name: Build tarball
+        run: |
+          mkdir -p /tmp/out
+          tar -czf /tmp/out/ergora-local-latest.tar.gz \
+            --transform 's,^,ergora-local/,' \
+            --exclude='node_modules' --exclude='.git' --exclude='dist' --exclude='.github' \
+            .
+          ls -lh /tmp/out/
+
+      - name: Upload to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.ERGORA_VPS_HOST }}
+          username: ${{ secrets.ERGORA_VPS_USER }}
+          key: ${{ secrets.ERGORA_VPS_SSH_KEY }}
+          source: "/tmp/out/ergora-local-latest.tar.gz"
+          target: ${{ secrets.ERGORA_VPS_PATH }}
+          strip_components: 2
+
+      - name: Create GitHub Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /tmp/out/ergora-local-latest.tar.gz
+          generate_release_notes: true

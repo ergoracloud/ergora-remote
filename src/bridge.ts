@@ -47,6 +47,8 @@ export async function registerDevice() {
       platform: config.platform,
       agent_version: '0.1.0',
       mounted_paths: config.mountedPaths,
+      device_role: config.deviceRole,
+      device_label: config.deviceLabel,
     });
     console.log(`[bridge] Device registered: ${config.deviceName} (${config.deviceId.slice(0, 8)}...)`);
     return result.ok;

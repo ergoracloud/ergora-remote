@@ -8,20 +8,37 @@ dotenv.config();
 
 const STATE_FILE = join(homedir(), '.ergora-remote', 'state.json');
 
+// Device role helps the agent (and your Intern back in the cloud) reason
+// about which device to use for a given task — "find the doc on my home Mac"
+// vs "open my work email". Stored in state.json on first run, sent up to
+// device_registrations so the portal + agent know.
+export type DeviceRole = 'home' | 'work' | 'laptop' | 'studio' | 'server' | 'other';
+
 interface AgentState {
   deviceId: string;
   deviceName: string;
   platform: string;
+  deviceRole?: DeviceRole;
+  deviceLabel?: string; // free-text label, e.g. "Tom's MacBook Pro 16"
 }
 
 function loadOrCreateState(): AgentState {
   if (existsSync(STATE_FILE)) {
     return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
   }
+  // Allow first-run env overrides — the install script can pass these so
+  // there's no interactive prompt. Otherwise we set role on first heartbeat
+  // via the portal UI.
+  const envRole = (process.env.DEVICE_ROLE || '').toLowerCase() as DeviceRole;
+  const validRoles: DeviceRole[] = ['home', 'work', 'laptop', 'studio', 'server', 'other'];
+  const role = validRoles.includes(envRole) ? envRole : undefined;
+
   const state: AgentState = {
     deviceId: randomUUID(),
     deviceName: process.env.DEVICE_NAME ?? require('os').hostname(),
     platform: process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
+    deviceRole: role,
+    deviceLabel: process.env.DEVICE_LABEL || undefined,
   };
   const dir = join(homedir(), '.ergora-remote');
   if (!existsSync(dir)) require('fs').mkdirSync(dir, { recursive: true });
@@ -38,6 +55,8 @@ export const config = {
   deviceId:      state.deviceId,
   deviceName:    state.deviceName,
   platform:      state.platform as 'macos' | 'windows' | 'linux',
+  deviceRole:    state.deviceRole,
+  deviceLabel:   state.deviceLabel,
   mountedPaths:  (process.env.MOUNTED_PATHS ?? '').split(',').map(p => p.trim()).filter(Boolean),
 };
 

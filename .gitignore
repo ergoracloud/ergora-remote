@@ -7,3 +7,10 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+
+# HUD — Tauri build artifacts
+src-tauri/target/
+src-tauri/gen/
+hud/dist/
+hud/.vite/
+hud/tsconfig.tsbuildinfo

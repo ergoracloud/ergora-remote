@@ -74,6 +74,89 @@ pm2 startup    # follow the printed instructions once
 
 ---
 
+## HUD — top-of-screen voice + keyboard overlay
+
+Alongside the headless agent, this repo ships an optional **Ergora HUD**: a
+Tauri-based always-on-top overlay that lets you dictate to or chat with your
+Ergora workspace from anywhere on your machine. Press the global hotkey
+(`Cmd+Shift+Space` on macOS, `Ctrl+Shift+Space` on Windows/Linux) and the
+HUD slides down from the top edge of whichever monitor your cursor is on.
+
+It uses the same `~/.ergora-remote/.env` as the headless agent, so you only
+configure Ergora Remote once. The headless agent and HUD can run independently
+or simultaneously — they don't share a process.
+
+### Layout
+
+```
+src/                    # existing Node CLI headless agent (unchanged)
+src-tauri/              # Tauri Rust shell — window, hotkey, OS integration
+hud/                    # Vite + React + Tailwind front-end
+```
+
+### Develop
+
+Requires the Rust toolchain (`rustup`) and the Tauri prerequisites for your
+platform: <https://v2.tauri.app/start/prerequisites/>.
+
+```
+cd ~/ergora-remote
+npm install                # root deps (incl. @tauri-apps/cli)
+npm run hud:install        # front-end deps
+npm run hud:dev            # launches Tauri + Vite together
+```
+
+`hud:dev` opens the HUD already configured against the credentials in
+`~/.ergora-remote/.env`. If `ERGORA_AGENT_TOKEN` is missing, the HUD shows
+an inline setup banner and stays in offline mode.
+
+For offline UI iteration without hitting the cloud:
+
+```
+VITE_MOCK_VOICE=1 npm run hud:dev
+```
+
+Mock mode returns canned responses for transcription, intent dispatch, and
+chat — perfect for working on the UI without a working tunnel to ergora.cloud.
+
+### Bundle
+
+```
+npm run hud:build              # platform-default bundle (DMG / MSI / AppImage)
+npm run hud:bundle:mac         # universal (Intel + Apple Silicon) DMG
+```
+
+Output lands in `src-tauri/target/release/bundle/`.
+
+### What it does
+
+- **Mic mode** (default) — circular mic button, animated pulse, VAD-light auto-stop after ~1.2s of silence. Audio is `webm/opus`, posted to `/api/transcribe`.
+- **Keyboard mode** — keyboard icon swap; auto-focused text input; Enter submits.
+- **Intent dispatch** — transcript or typed text is POSTed to `/api/voice`. The five intents (`find-file`, `capture-to-brain`, `open-tool`, `run-task`, `chat`) each render their own result UI inside the expanded HUD panel.
+- **TTS** — chat replies are spoken via `/api/tts` (toggleable in settings).
+- **Privacy** — no always-on listening. Audio leaves the machine only when you trigger the HUD. A 50-entry local ring buffer of prompts is kept in the encrypted Tauri app data dir; nothing about the HUD's history syncs to the cloud.
+- **Multi-monitor** — appears on the monitor where the cursor currently is.
+- **Esc / blur** — dismisses (hides, doesn't quit). Hotkey toggles visibility.
+
+### Cross-platform notes
+
+| | Status |
+|---|---|
+| macOS | Primary target. Window is promoted to a floating panel level so it sits above fullscreen apps. |
+| Windows | Builds. `WS_EX_TOOLWINDOW` / topmost behaviour TODO — see `src-tauri/src/lib.rs`. |
+| Linux | Builds. Above-fullscreen behaviour depends on the WM (Wayland layer-shell or `_NET_WM_WINDOW_TYPE_DOCK` on X11) — TODO. |
+
+### Settings
+
+Open the gear icon inside the HUD to:
+- Change the global hotkey.
+- Override the project ID (defaults to `ERGORA_PROJECT_ID` from the env).
+- Toggle "Speak chat replies aloud".
+
+User prefs persist to the Tauri app data dir (`hud-prefs.json`).
+
+---
+
 ## Security
 
 - Every line of code that runs on your machine is in this repo. You can

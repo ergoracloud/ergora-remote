@@ -18,6 +18,7 @@ import { MicButton } from './components/MicButton';
 import { KeyboardInput } from './components/KeyboardInput';
 import { ResultPanel } from './components/ResultPanel';
 import { useRecorder } from './hooks/useRecorder';
+import { useStreamingTranscription } from './hooks/useStreamingTranscription';
 import { useHudWindow } from './hooks/useHudWindow';
 import {
   loadConfig,
@@ -40,7 +41,11 @@ type Phase = 'idle' | 'recording' | 'transcribing' | 'dispatching' | 'speaking' 
 
 export default function App() {
   const { hide, setExpanded } = useHudWindow();
-  const recorder = useRecorder();
+  // Live-streaming transcription is the primary path — interim words appear
+  // as the user speaks. If the stream fails to open we fall back to the
+  // whole-blob recorder (kept around as `legacyRecorder`).
+  const stream = useStreamingTranscription();
+  const legacyRecorder = useRecorder();
 
   const [mode, setMode] = useState<Mode>('mic');
   const [phase, setPhase] = useState<Phase>('idle');
@@ -48,6 +53,16 @@ export default function App() {
   const [keyboardText, setKeyboardText] = useState('');
   const [response, setResponse] = useState<VoiceResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // True iff the streaming path is currently driving the mic. False means we
+  // fell through to the legacy whole-blob recorder.
+  const [usingStream, setUsingStream] = useState(false);
+
+  // Surface either the confirmed final transcript or the live interim
+  // hypothesis as the visible text. Final wins so the bar locks once
+  // confirmed.
+  const liveTranscript = transcript || stream.finalText || stream.interim;
+  const recording = usingStream ? stream.recording : legacyRecorder.recording;
+  const recorderLevel = usingStream ? stream.level : legacyRecorder.level;
 
   const [config, setConfig] = useState<ErgoraConfig | null>(null);
   const [missingConfig, setMissingConfig] = useState<string[]>([]);
@@ -101,7 +116,7 @@ export default function App() {
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, recorder.recording]);
+  }, [mode, recording]);
 
   const reset = useCallback(() => {
     setTranscript('');
@@ -109,7 +124,8 @@ export default function App() {
     setResponse(null);
     setError(null);
     setPhase('idle');
-  }, []);
+    stream.reset();
+  }, [stream]);
 
   const dismiss = useCallback(() => {
     reset();
@@ -170,27 +186,49 @@ export default function App() {
 
   const toggleRecording = useCallback(async () => {
     if (!config) return;
-    if (recorder.recording) {
-      const blob = await recorder.stop();
-      if (!blob || blob.size === 0) {
-        setPhase('idle');
-        return;
-      }
-      setPhase('transcribing');
-      try {
-        const r = await transcribe(config, blob);
-        setTranscript(r.text);
-        await runDispatch(r.text);
-      } catch (err) {
-        setError((err as Error).message);
-        setPhase('error');
+    if (recording) {
+      // Stop whichever path is active.
+      if (usingStream) {
+        const finalText = await stream.stop();
+        if (!finalText) {
+          setPhase('idle');
+          return;
+        }
+        setTranscript(finalText);
+        await runDispatch(finalText);
+      } else {
+        const blob = await legacyRecorder.stop();
+        if (!blob || blob.size === 0) {
+          setPhase('idle');
+          return;
+        }
+        setPhase('transcribing');
+        try {
+          const r = await transcribe(config, blob);
+          setTranscript(r.text);
+          await runDispatch(r.text);
+        } catch (err) {
+          setError((err as Error).message);
+          setPhase('error');
+        }
       }
     } else {
       reset();
-      await recorder.start();
-      setPhase('recording');
+      // Try streaming first — gives interim partials and ~300ms perceived
+      // latency. If the stream can't open (cloud unreachable, missing token),
+      // fall back to the legacy whole-blob recorder.
+      const opened = await stream.start(config);
+      if (opened) {
+        setUsingStream(true);
+        setPhase('recording');
+      } else {
+        setUsingStream(false);
+        await legacyRecorder.start();
+        setPhase('recording');
+      }
     }
-  }, [config, recorder, reset, runDispatch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config, recording, usingStream, stream, legacyRecorder, reset, runDispatch]);
 
   const submitKeyboard = useCallback(async () => {
     const text = keyboardText.trim();
@@ -214,11 +252,11 @@ export default function App() {
     if (phase === 'dispatching') return 'Routing…';
     if (phase === 'speaking') return 'Speaking…';
     if (mode === 'mic') {
-      if (recorder.recording) return 'Listening…';
+      if (recording) return 'Listening…';
       return 'Tap to speak';
     }
     return '';
-  }, [error, phase, mode, recorder.recording]);
+  }, [error, phase, mode, recording]);
 
   return (
     <div className="flex h-screen w-screen items-start justify-center pt-1">
@@ -230,8 +268,8 @@ export default function App() {
         <div className="flex h-12 items-center gap-3 px-3">
           {mode === 'mic' ? (
             <MicButton
-              recording={recorder.recording}
-              level={recorder.level}
+              recording={recording}
+              level={recorderLevel}
               busy={phase === 'transcribing' || phase === 'dispatching'}
               onClick={() => void toggleRecording()}
             />
@@ -254,8 +292,17 @@ export default function App() {
                 onSubmit={submitKeyboard}
                 busy={phase === 'transcribing' || phase === 'dispatching'}
               />
-            ) : transcript ? (
-              <div className="truncate text-sm text-slate-200">{transcript}</div>
+            ) : liveTranscript ? (
+              // Confirmed text in slate-200; live interim text greyed out so
+              // the user can see the recogniser keeping up. Final wins once
+              // the stream resolves and `transcript` is set.
+              <div className="truncate text-sm">
+                {transcript || stream.finalText ? (
+                  <span className="text-slate-200">{transcript || stream.finalText}</span>
+                ) : (
+                  <span className="text-slate-400">{stream.interim}</span>
+                )}
+              </div>
             ) : (
               <div className="text-sm text-slate-400">{hint || 'Tap to speak'}</div>
             )}

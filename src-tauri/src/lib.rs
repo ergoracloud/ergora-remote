@@ -17,6 +17,12 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+mod transcription;
+use transcription::{
+    new_state as new_transcription_state, push_audio_chunk, start_transcription_stream,
+    stop_transcription_stream, transcription_capabilities,
+};
+
 const HUD_LABEL: &str = "hud";
 const COLLAPSED_HEIGHT: f64 = 56.0;
 const EXPANDED_HEIGHT: f64 = 360.0;
@@ -169,12 +175,59 @@ fn raise_to_floating_level<R: Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn raise_to_floating_level<R: Runtime>(_window: &WebviewWindow<R>) {
-    // TODO(windows): Use SetWindowPos with HWND_TOPMOST + WS_EX_TOOLWINDOW
-    // to keep the overlay out of Alt+Tab and above other windows.
-    // TODO(linux): Use Wayland layer-shell (Sway/Hyprland) or set
-    // _NET_WM_WINDOW_TYPE_DOCK on X11 for above-fullscreen behaviour.
+/// Windows — keep the overlay topmost, hide it from Alt+Tab, and avoid the
+/// taskbar. `WS_EX_TOOLWINDOW` strips the window from the taskbar / Alt+Tab
+/// chain, `WS_EX_TOPMOST` raises it above ordinary windows, and a
+/// `HWND_TOPMOST` SetWindowPos call enforces the z-order.
+#[cfg(target_os = "windows")]
+fn raise_to_floating_level<R: Runtime>(window: &WebviewWindow<R>) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    };
+
+    let Ok(hwnd_raw) = window.hwnd() else {
+        log::warn!("raise_to_floating_level: hwnd() unavailable on Windows");
+        return;
+    };
+    let hwnd = HWND(hwnd_raw.0 as *mut _);
+    unsafe {
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let new_style =
+            current | (WS_EX_TOOLWINDOW.0 as isize) | (WS_EX_TOPMOST.0 as isize);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Linux — request that the WM treat the window as a `_NET_WM_WINDOW_TYPE_DOCK`
+/// surface. On X11 (Mutter/KWin/i3/...) this typically keeps the overlay above
+/// fullscreen apps; on Wayland behaviour is compositor-dependent and a
+/// proper layer-shell integration would be the next step. We also pin
+/// `set_keep_above` and `stick` so the overlay is visible on every workspace.
+#[cfg(target_os = "linux")]
+fn raise_to_floating_level<R: Runtime>(window: &WebviewWindow<R>) {
+    use gdk::WindowTypeHint;
+    use gtk::prelude::*;
+
+    let Ok(gtk_window) = window.gtk_window() else {
+        log::warn!("raise_to_floating_level: gtk_window() unavailable on Linux");
+        return;
+    };
+    gtk_window.set_type_hint(WindowTypeHint::Dock);
+    gtk_window.set_keep_above(true);
+    gtk_window.set_skip_taskbar_hint(true);
+    gtk_window.set_skip_pager_hint(true);
+    gtk_window.stick();
 }
 
 fn default_accelerator() -> &'static str {
@@ -211,6 +264,7 @@ pub fn run() {
                 })
                 .build(),
         )
+        .manage(new_transcription_state())
         .invoke_handler(tauri::generate_handler![
             toggle_hud,
             show_hud,
@@ -218,6 +272,10 @@ pub fn run() {
             set_hud_expanded,
             recenter_hud,
             set_global_hotkey,
+            start_transcription_stream,
+            push_audio_chunk,
+            stop_transcription_stream,
+            transcription_capabilities,
         ])
         .setup(|app| {
             // Register the default global hotkey once the app is ready.

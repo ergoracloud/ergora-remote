@@ -24,10 +24,16 @@ async function main() {
 
   validateConfig();
 
-  // Register device with Ergora cloud
+  // Register device with Ergora cloud. May soft-block waiting for admin
+  // approval (handled inside registerDevice) or hard-reject after 24h.
   const registered = await registerDevice();
-  if (!registered) {
-    console.error('Failed to register device. Check your ERGORA_AGENT_TOKEN and network connection.');
+  if (!registered.ok) {
+    console.error('');
+    console.error('   ❌ ' + registered.message);
+    console.error('');
+    if (registered.reason === 'error') {
+      console.error('   Check your ERGORA_AGENT_TOKEN and network connection.');
+    }
     process.exit(1);
   }
 

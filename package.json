@@ -1,13 +1,17 @@
 {
   "name": "ergora-local",
   "version": "0.1.0",
-  "description": "Ergora Desktop Agent — bridges your local machine to your Ergora workspace",
+  "description": "Ergora Desktop Agent — bridges your local machine to your Ergora workspace, plus the top-of-screen HUD.",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "setup": "bash scripts/setup.sh"
+    "setup": "bash scripts/setup.sh",
+    "hud:install": "npm --prefix hud install",
+    "hud:dev": "tauri dev --config src-tauri/tauri.conf.json",
+    "hud:build": "tauri build --config src-tauri/tauri.conf.json",
+    "hud:bundle:mac": "tauri build --config src-tauri/tauri.conf.json --target universal-apple-darwin"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.55.0",
@@ -17,6 +21,7 @@
     "open": "^10.1.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0"

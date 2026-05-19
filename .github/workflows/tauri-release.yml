@@ -1,0 +1,137 @@
+# Build the Ergora HUD (Tauri) installers on every release tag and attach
+# them to a GitHub Release. Triggered by tags of the form `hud-v*` so this
+# workflow stays out of the way of the existing Node-agent release.yml,
+# which is fired by `v*` tags / pushes to main.
+#
+# Outputs:
+#   • macOS  — unsigned .dmg (Intel x86_64). Users right-click → Open on
+#              first launch until we have an Apple Developer signing cert.
+#   • Linux  — .AppImage (portable) + .deb (Debian/Ubuntu/Chromebook Linux).
+#   • Windows — unsigned .msi. SmartScreen warning on first launch until
+#              we have a code-signing cert.
+#
+# To cut a release locally:
+#   git tag hud-v0.1.0 && git push origin hud-v0.1.0
+#
+# Required secrets: none for now (everything is unsigned). When the Apple
+# Developer membership lands, add:
+#   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY
+#   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID  ← for notarization
+# and set `ENABLE_CODE_SIGNING: 'true'` on the macOS leg below.
+
+name: Ergora HUD — release
+
+on:
+  push:
+    tags: ['hud-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to release (e.g. hud-v0.1.0)'
+        required: true
+        default: 'hud-v0.1.0-dev'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Intel (x86_64). Use macos-13 — macos-latest is arm64 by
+          # default and we don't have a universal target set up yet.
+          - platform: 'macos-13'
+            args: '--target x86_64-apple-darwin'
+            label: 'macOS x86_64'
+          # Linux AppImage + .deb. Ubuntu 22.04 keeps glibc compatibility
+          # broad enough for Chromebook Linux containers + most distros.
+          - platform: 'ubuntu-22.04'
+            args: ''
+            label: 'Linux x86_64'
+          # Windows MSI. Skipped for now — tomorrow's test target is
+          # macOS + Linux. Re-enable by uncommenting once we want Windows
+          # in the matrix.
+          # - platform: 'windows-latest'
+          #   args: ''
+          #   label: 'Windows x86_64'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            hud/package-lock.json
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS x86_64 isn't the default on macos-13's preinstalled rust,
+          # but rustup will pick it up via the matrix --target arg.
+          targets: ${{ matrix.platform == 'macos-13' && 'x86_64-apple-darwin' || '' }}
+
+      - name: Cargo cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Linux deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          # libwebkit2gtk-4.1: tauri v2 webview. The -dev packages are what
+          # the cargo build actually links against. librsvg2 is the SVG
+          # backend the AppImage runtime expects for icons.
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev
+
+      - name: Install npm deps (root + hud)
+        run: |
+          npm ci
+          npm --prefix hud ci
+
+      - name: Tauri build
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # The tag that should own the uploaded artifacts. On workflow_dispatch
+          # we fall back to the input value so manual runs still produce a
+          # cohesive Release.
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: 'Ergora HUD ${{ github.event.inputs.tag || github.ref_name }}'
+          releaseBody: |
+            Ergora HUD desktop installers.
+
+            Unsigned builds — on macOS, control-click the app → Open the
+            first time. On Windows, the SmartScreen "Run anyway" link.
+            Linux .AppImage / .deb just run.
+
+            Signing + notarization land in a follow-up once the Apple
+            Developer Program membership clears.
+          releaseDraft: true
+          prerelease: false
+          # tauri-action shells out to `tauri build` — pass our target flag
+          # through. tauriScript reads our package.json scripts. The build
+          # picks up tauri.conf.json from src-tauri/.
+          projectPath: '.'
+          # Reuse the existing hud:build script (it already passes our custom
+          # --config src-tauri/tauri.conf.json). The action appends `args`
+          # after `--`, so `npm run hud:build -- --target …` is what runs.
+          tauriScript: 'npm run hud:build --'
+          args: ${{ matrix.args }}

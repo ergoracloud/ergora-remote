@@ -41,6 +41,7 @@ import {
   type ErgoraConfig,
   type UserPrefs,
 } from './lib/config';
+import { openSignIn, setupPairListener } from './lib/pair';
 import { appendHistory } from './lib/history';
 import {
   chatComplete,
@@ -140,22 +141,72 @@ export default function App() {
   const [missingConfig, setMissingConfig] = useState<string[]>([]);
   const [prefs, setPrefs] = useState<UserPrefs | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // True while the user has clicked Sign in and we're waiting for the
+  // browser → ergora-remote:// callback to land. Drives the "Waiting for
+  // browser…" copy on the sign-in button.
+  const [signingIn, setSigningIn] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   // ── Boot — config + prefs ─────────────────────────────────────────────
+  // Re-runnable so the pair listener can refresh us after a successful
+  // sign-in without remounting the whole app.
+  const refreshConfig = useCallback(async () => {
+    const status = await loadConfig();
+    setConfig(status.config);
+    setMissingConfig(status.missing);
+    // An unconfigured HUD opens into pill-wide so the Sign-in surface has a
+    // proper body to render in (a bottom banner on the 76px pill overflows
+    // and clips the rounded corners).
+    if (status.missing.length > 0) setView((v) => (v === 'pill' ? 'pill-wide' : v));
+    return status;
+  }, []);
+
   useEffect(() => {
     (async () => {
-      const status = await loadConfig();
-      setConfig(status.config);
-      setMissingConfig(status.missing);
-      // An unconfigured HUD opens straight into pill-wide so the setup notice
-      // has a proper body to render in (a bottom banner on the 76px pill
-      // overflows and clips the rounded corners).
-      if (status.missing.length > 0) setView('pill-wide');
+      await refreshConfig();
       setPrefs(await loadPrefs());
     })();
-  }, []);
+  }, [refreshConfig]);
+
+  // ── Pair listener — handles the ergora-remote://pair?token=… callback
+  // that the OS routes from the browser after the user signs in on
+  // ergora.cloud/remote/pair. Single global listener for the app's lifetime.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let alive = true;
+    void setupPairListener({
+      onPaired: () => {
+        setSigningIn(false);
+        // Token has been written to ~/.ergora-remote/.env; reload config
+        // so the HUD switches out of the "Sign in" state.
+        void refreshConfig();
+      },
+      onError: (err) => {
+        setSigningIn(false);
+        setError(`Couldn't save the agent token: ${err.message}`);
+      },
+    }).then((un) => {
+      if (alive) unlisten = un;
+      else un();
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, [refreshConfig]);
+
+  const signIn = useCallback(async () => {
+    const apiUrl = config?.apiUrl ?? 'https://ergora.cloud';
+    setSigningIn(true);
+    setError(null);
+    try {
+      await openSignIn(apiUrl);
+    } catch (err) {
+      setSigningIn(false);
+      setError(`Couldn't open the browser: ${(err as Error).message}`);
+    }
+  }, [config]);
 
   // Esc dismisses; the Rust side already hides on blur, but we also catch the
   // key here so the user can dismiss without clicking out.
@@ -583,17 +634,21 @@ export default function App() {
             {effectiveView === 'pill-wide' && (
               <div className="hud-scroll min-h-0 flex-1 overflow-auto border-t border-white/5 px-3.5 py-2.5 text-[13px] leading-relaxed">
                 {missingConfig.length > 0 ? (
-                  <span className="text-amber-200">
-                    Not configured — add{' '}
-                    <code className="rounded bg-black/30 px-1 py-0.5">
-                      {missingConfig.join(', ')}
-                    </code>{' '}
-                    to{' '}
-                    <code className="rounded bg-black/30 px-1 py-0.5">
-                      ~/.ergora-remote/.env
-                    </code>
-                    .
-                  </span>
+                  // First-launch / signed-out state. The user clicks one
+                  // button; the rest is the browser handoff.
+                  <div className="flex h-full flex-col items-start justify-center gap-2">
+                    <p className="text-slate-300">
+                      Welcome to Ergora HUD. Sign in to your account to get started.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void signIn()}
+                      disabled={signingIn}
+                      className="hud-no-drag inline-flex items-center gap-2 rounded-lg bg-ergora-amber px-3 py-1.5 text-[12px] font-medium text-slate-900 transition hover:bg-ergora-amber/90 disabled:opacity-60"
+                    >
+                      {signingIn ? 'Waiting for browser…' : 'Sign in to Ergora'}
+                    </button>
+                  </div>
                 ) : error ? (
                   <span className="text-rose-300">{error}</span>
                 ) : response ? (

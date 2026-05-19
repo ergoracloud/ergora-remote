@@ -27,6 +27,9 @@ tauri-plugin-store = "2"
 tauri-plugin-os = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
+# Custom URL scheme handler — receives ergora-remote://pair?... callbacks
+# from the browser after the user signs in on ergora.cloud/remote/pair.
+tauri-plugin-deep-link = "2"
 log = "0.4"
 tauri-plugin-log = "2"
 

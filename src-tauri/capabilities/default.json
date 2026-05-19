@@ -30,6 +30,7 @@
     "fs:allow-home-write",
     "http:default",
     "shell:allow-open",
+    "deep-link:default",
     "store:default",
     "os:default",
     "dialog:default",

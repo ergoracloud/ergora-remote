@@ -77,5 +77,11 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["ergora-remote"]
+      }
+    }
+  }
 }

@@ -330,6 +330,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Receives ergora-remote://pair?token=…&state=… callbacks. The plugin
+        // takes care of LSApplicationOpenURL on macOS, the gtk-application
+        // "open" signal on Linux, and command-line arg handling on Windows.
+        // JS side hooks via `onOpenUrl` to extract the token and pair.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()

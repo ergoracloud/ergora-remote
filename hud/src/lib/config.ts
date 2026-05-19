@@ -106,9 +106,58 @@ export async function loadConfig(): Promise<ConfigStatus> {
   return { ok: missing.length === 0, missing, config };
 }
 
+/// Persist the agent token to ~/.ergora-remote/.env after the user signs in
+/// via the OAuth-style pairing flow (see ./pair.ts). The headless Node
+/// agent reads the same file, so writing here gives both sides one
+/// canonical credential location. We preserve any other keys already in the
+/// file (apiUrl override, projectId, etc.) and only update the token line.
+export async function saveAgentToken(token: string): Promise<void> {
+  if (!token || !token.startsWith('eal_')) {
+    throw new Error('saveAgentToken: refusing to persist a non-eal_ token');
+  }
+  const home = await homeDir();
+  const dir = await join(home, '.ergora-remote');
+  const file = await join(dir, '.env');
+
+  // Make sure the directory exists before writing — first install means it
+  // doesn't yet (the headless agent would otherwise be the one to create it).
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch {
+    // already exists — non-fatal
+  }
+
+  // Read existing .env if present so we don't clobber unrelated keys.
+  let existing = '';
+  try {
+    if (await exists(file)) {
+      existing = await readTextFile(file);
+    }
+  } catch {
+    existing = '';
+  }
+
+  const lines = existing.split(/\r?\n/);
+  let updated = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*ERGORA_AGENT_TOKEN\s*=/.test(lines[i])) {
+      lines[i] = `ERGORA_AGENT_TOKEN=${token}`;
+      updated = true;
+      break;
+    }
+  }
+  if (!updated) {
+    // Drop a trailing newline if present so we don't accumulate blanks.
+    while (lines.length && lines[lines.length - 1] === '') lines.pop();
+    lines.push(`ERGORA_AGENT_TOKEN=${token}`);
+  }
+  // End with one newline.
+  const out = lines.join('\n').replace(/\n*$/, '\n');
+  await writeTextFile(file, out);
+}
+
 /// Save user-tunable preferences (hotkey, TTS toggle, project) to the Tauri
-/// app data dir. We deliberately do NOT touch ~/.ergora-remote/.env from the
-/// HUD — the headless agent owns that file.
+/// app data dir.
 export interface UserPrefs {
   hotkey: string;
   ttsEnabled: boolean;

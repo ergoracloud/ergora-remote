@@ -1,10 +1,15 @@
 // Bridge between the React app and the Rust window-management commands.
 // We listen for the global hotkey via Tauri events and expose helpers to
-// resize the window when the result panel mounts/unmounts.
+// resize the window between its three states (pill / recording / panel).
 
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useCallback, useEffect, useState } from 'react';
+
+// The three HUD window sizes. `pill` is the compact idle state, `recording`
+// widens to fit the live transcript + cancel/finish controls, `panel` is the
+// ~340x360 scratch pad.
+export type HudSize = 'pill' | 'recording' | 'panel';
 
 export function useHudWindow() {
   const [visible, setVisible] = useState<boolean>(false);
@@ -39,9 +44,9 @@ export function useHudWindow() {
     setVisible(false);
   }, []);
 
-  const setExpanded = useCallback(async (expanded: boolean) => {
-    await invoke('set_hud_expanded', { expanded }).catch(() => {});
+  const setSize = useCallback(async (state: HudSize) => {
+    await invoke('set_hud_size', { state }).catch(() => {});
   }, []);
 
-  return { visible, hide, setExpanded };
+  return { visible, hide, setSize };
 }

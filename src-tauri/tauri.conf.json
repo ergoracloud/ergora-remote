@@ -15,10 +15,10 @@
       {
         "label": "hud",
         "title": "Ergora HUD",
-        "width": 640,
+        "width": 220,
         "height": 56,
         "minHeight": 56,
-        "minWidth": 480,
+        "minWidth": 200,
         "maxHeight": 480,
         "maxWidth": 960,
         "resizable": false,

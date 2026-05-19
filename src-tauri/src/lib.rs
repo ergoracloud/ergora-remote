@@ -24,10 +24,24 @@ use transcription::{
 };
 
 const HUD_LABEL: &str = "hud";
-const COLLAPSED_HEIGHT: f64 = 56.0;
-const EXPANDED_HEIGHT: f64 = 360.0;
-const HUD_WIDTH: f64 = 640.0;
+// Three window states. The HUD is a small pill at idle and only grows when
+// recording (to show the live transcript) or when the scratch pad is open.
+const PILL_HEIGHT: f64 = 56.0;
+const PANEL_HEIGHT: f64 = 360.0;
+const HUD_WIDTH_PILL: f64 = 220.0;
+const HUD_WIDTH_RECORDING: f64 = 420.0;
+const HUD_WIDTH_PANEL: f64 = 340.0;
 const TOP_OFFSET: f64 = 12.0;
+
+/// The three HUD window sizes, keyed by the string the JS side passes.
+fn hud_dimensions(state: &str) -> (f64, f64) {
+    match state {
+        "recording" => (HUD_WIDTH_RECORDING, PILL_HEIGHT),
+        "panel" => (HUD_WIDTH_PANEL, PANEL_HEIGHT),
+        // "pill" and any unknown value fall back to the compact idle pill.
+        _ => (HUD_WIDTH_PILL, PILL_HEIGHT),
+    }
+}
 
 fn get_hud_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
     app.get_webview_window(HUD_LABEL)
@@ -35,6 +49,9 @@ fn get_hud_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
 
 /// Position the HUD window centered on the top edge of whichever monitor
 /// the cursor is currently on. Falls back to the primary monitor.
+///
+/// Centring uses the window's *current* outer width rather than a fixed
+/// const, so it stays centred across pill/recording/panel resizes.
 fn position_on_active_monitor<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
     let cursor_pos = window.cursor_position().ok();
     let monitors = window.available_monitors()?;
@@ -63,8 +80,13 @@ fn position_on_active_monitor<R: Runtime>(window: &WebviewWindow<R>) -> tauri::R
     let ms = monitor.size();
 
     // Compute logical layout — Tauri's set_position takes physical coords.
+    // Use the window's actual current width so centring tracks resizes.
+    let hud_width = window
+        .outer_size()
+        .map(|s| s.width as f64 / scale)
+        .unwrap_or(HUD_WIDTH_PILL);
     let logical_width = ms.width as f64 / scale;
-    let x_logical = (logical_width - HUD_WIDTH) / 2.0;
+    let x_logical = (logical_width - hud_width) / 2.0;
     let x_physical = mp.x + (x_logical * scale).round() as i32;
     let y_physical = mp.y + (TOP_OFFSET * scale).round() as i32;
 
@@ -108,20 +130,29 @@ async fn hide_hud<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
-/// Resize the HUD between collapsed (mic only) and expanded (results visible).
-/// Called from JS when the result panel mounts/unmounts.
+/// Resize the HUD between its three states: "pill" (idle), "recording"
+/// (live transcript + cancel/finish) and "panel" (scratch pad / results).
+/// Sets both width and height, then re-centres on the active monitor.
 #[tauri::command]
-async fn set_hud_expanded<R: Runtime>(app: AppHandle<R>, expanded: bool) -> Result<(), String> {
+async fn set_hud_size<R: Runtime>(app: AppHandle<R>, state: String) -> Result<(), String> {
     let Some(window) = get_hud_window(&app) else {
         return Err("HUD window not found".into());
     };
-    let height = if expanded { EXPANDED_HEIGHT } else { COLLAPSED_HEIGHT };
+    let (width, height) = hud_dimensions(&state);
     window
-        .set_size(LogicalSize::new(HUD_WIDTH, height))
+        .set_size(LogicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
     // After a resize the window may shift; re-center on the active monitor.
     position_on_active_monitor(&window).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Backwards-compatible shim — older JS may still call `set_hud_expanded`.
+/// Maps the boolean onto the new three-state command.
+#[tauri::command]
+async fn set_hud_expanded<R: Runtime>(app: AppHandle<R>, expanded: bool) -> Result<(), String> {
+    let state = if expanded { "panel" } else { "pill" };
+    set_hud_size(app, state.to_string()).await
 }
 
 /// Re-center the HUD without changing visibility — used when the user moves
@@ -269,6 +300,7 @@ pub fn run() {
             toggle_hud,
             show_hud,
             hide_hud,
+            set_hud_size,
             set_hud_expanded,
             recenter_hud,
             set_global_hotkey,

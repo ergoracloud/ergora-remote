@@ -70,7 +70,10 @@ function pickMimeType(): string {
 }
 
 export function useStreamingTranscription(opts: StreamingOptions = {}): StreamingHandle {
-  const { silenceMs = 1200, silenceThreshold = 0.012, maxMs = 30_000 } = opts;
+  // 2500ms, not 1200: a 1.2s window cut the user off on a natural mid-thought
+  // pause, and snapped the HUD shut almost immediately if they hadn't started
+  // speaking yet. 2.5s leaves room to think without feeling laggy.
+  const { silenceMs = 2500, silenceThreshold = 0.012, maxMs = 30_000 } = opts;
 
   const [recording, setRecording] = useState(false);
   const [interim, setInterim] = useState('');

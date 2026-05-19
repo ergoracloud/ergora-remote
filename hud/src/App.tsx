@@ -4,7 +4,7 @@
 //   • pill       — idle. ~220px. Mic affordance + one-line hint, or in
 //                  keyboard mode a minimal text field.
 //   • recording  — ~420px. Live interim transcript + cancel (✕) / finish (✓).
-//   • panel      — ~340x360. The scratch pad: history + long agent responses.
+//   • panel      — ~340x360. The notepad: history + long agent responses.
 //
 // Flow:
 //   1. Hotkey or tray click → Rust shows the window → React mounts as a pill.
@@ -12,16 +12,23 @@
 //      pill widens to `recording`.
 //   3. ✓ (or tap-mic, or silence) stops → POST audio to /api/transcribe.
 //   4. Transcribed text → POST to /api/voice → render the per-intent result.
-//      Short results stay in the pill; long ones expand into the scratch pad.
+//      Short results stay in the pill; long ones expand into the notepad.
 //   5. Esc / blur / explicit dismiss → window hides (Rust side).
 //
 // Networking lives in lib/api.ts; media plumbing in hooks/useRecorder.ts and
 // hooks/useStreamingTranscription.ts — this component is the state machine.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import { Check, ChevronDown, Keyboard, Mic, Send, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { MicButton } from './components/MicButton';
 import { KeyboardInput } from './components/KeyboardInput';
 import { ScratchPad } from './components/ScratchPad';
 import { useRecorder } from './hooks/useRecorder';
@@ -46,8 +53,33 @@ import {
 type Mode = 'mic' | 'keyboard';
 type Phase = 'idle' | 'recording' | 'transcribing' | 'dispatching' | 'speaking' | 'done' | 'error';
 
+// The four user-facing HUD views, smallest → largest. A response drops in
+// underneath the pill (`pill-wide`); a long one or the history list uses the
+// `notepad`; `notepad-wide` is the notepad at ~2x for chat-window use. The
+// user can drag the corner grip between any of them.
+type View = 'pill' | 'pill-wide' | 'notepad' | 'notepad-wide';
+
+// Logical px size of each view — must mirror the constants in src-tauri/lib.rs.
+// Used to seed the drag grip and to snap a free-form drag back onto the ladder.
+const VIEW_SIZE: Record<View, [number, number]> = {
+  pill: [220, 76],
+  'pill-wide': [440, 150],
+  notepad: [360, 360],
+  'notepad-wide': [560, 560],
+};
+
+// Snap a dragged height onto the nearest view. The pill→pill-wide threshold
+// is deliberately low (105, i.e. ~29px of drag) so a small "make it a bit
+// bigger" gesture commits to the expanded pill instead of springing back.
+function snapView(height: number): View {
+  if (height < 105) return 'pill';
+  if (height < 255) return 'pill-wide';
+  if (height < 460) return 'notepad';
+  return 'notepad-wide';
+}
+
 // A response is "short" if it has no scrollable detail to read back — it can
-// stay inline in the pill rather than forcing the scratch pad open.
+// stay inline in the pill rather than forcing the notepad open.
 function isShortResponse(r: VoiceResponse | null): boolean {
   if (!r || !r.ok) return false;
   switch (r.action) {
@@ -84,16 +116,25 @@ export default function App() {
   // True iff the streaming path is currently driving the mic. False means we
   // fell through to the legacy whole-blob recorder.
   const [usingStream, setUsingStream] = useState(false);
-  // The user explicitly opened the scratch pad (chevron). Distinct from a
-  // long response auto-expanding it.
-  const [padOpen, setPadOpen] = useState(false);
+  // The current HUD view on the pill → notepad-wide ladder. Set automatically
+  // when a response arrives (short → pill-wide, long → notepad) and manually
+  // by the chevron or the corner drag grip.
+  const [view, setView] = useState<View>('pill');
+  // Non-null only while the corner grip is being dragged. Holds the live
+  // card size {w,h}. During a drag the OS window is parked at a fixed
+  // oversized envelope and only the card inside it resizes — so the cursor
+  // can't slip off the window and the gesture can't be lost.
+  const [dragSize, setDragSize] = useState<{ w: number; h: number } | null>(null);
 
   // Surface either the confirmed final transcript or the live interim
   // hypothesis as the visible text. Final wins so the bar locks once
   // confirmed.
   const liveTranscript = transcript || stream.finalText || stream.interim;
   const recording = usingStream ? stream.recording : legacyRecorder.recording;
-  const recorderLevel = usingStream ? stream.level : legacyRecorder.level;
+  // `recording` only flips true once the recorder is actually up; `phase`
+  // is set to 'recording' optimistically on tap. Render off this so the
+  // listening UI appears instantly.
+  const liveRecording = recording || phase === 'recording';
 
   const [config, setConfig] = useState<ErgoraConfig | null>(null);
   const [missingConfig, setMissingConfig] = useState<string[]>([]);
@@ -108,6 +149,10 @@ export default function App() {
       const status = await loadConfig();
       setConfig(status.config);
       setMissingConfig(status.missing);
+      // An unconfigured HUD opens straight into pill-wide so the setup notice
+      // has a proper body to render in (a bottom banner on the 76px pill
+      // overflows and clips the rounded corners).
+      if (status.missing.length > 0) setView('pill-wide');
       setPrefs(await loadPrefs());
     })();
   }, []);
@@ -126,22 +171,50 @@ export default function App() {
   }, [hide]);
 
   // ── Window sizing — derive the one true state and push it to Rust ──────
-  // recording → `recording`; scratch pad (user-opened OR a long/rich
-  // response/error) → `panel`; everything else → the idle `pill`.
-  const showPanel =
-    padOpen ||
-    Boolean(error) ||
-    (Boolean(response) && !isShortResponse(response));
+  // While dragging, the visible view follows the live card height; otherwise
+  // the explicit `view` rules. `effectiveView` drives all content rendering.
+  const effectiveView: View = dragSize ? snapView(dragSize.h) : view;
+
+  // The notepad views render the ScratchPad; pill / pill-wide render the bar.
+  const showPanel = effectiveView === 'notepad' || effectiveView === 'notepad-wide';
+
+  // The transient wide single-row bar: shown while recording or typing, but
+  // only before a response exists (view still `pill`). Once a response lands
+  // the view itself drives the size.
+  const wantsBar =
+    effectiveView === 'pill' &&
+    (liveRecording ||
+      phase === 'transcribing' ||
+      phase === 'dispatching' ||
+      mode === 'keyboard');
 
   useEffect(() => {
-    if (recording || phase === 'transcribing') {
-      void setSize('recording');
-    } else if (showPanel) {
-      void setSize('panel');
-    } else {
-      void setSize('pill');
+    // During a grip-drag the OS window is parked at the oversized `drag`
+    // envelope; the card inside resizes instead. Otherwise the window tracks
+    // the view exactly.
+    if (dragSize) {
+      void setSize('drag');
+      return;
     }
-  }, [recording, phase, showPanel, setSize]);
+    void setSize(wantsBar ? 'bar' : view);
+  }, [dragSize, wantsBar, view, setSize]);
+
+  // Auto-size to a response: short answers drop into `pill-wide`, longer ones
+  // and errors open the `notepad`. Skips it if the user has already dragged
+  // out to a bigger view than we'd pick.
+  useEffect(() => {
+    if (dragSize) return;
+    if (error) {
+      setView((v) => (v === 'pill' ? 'pill-wide' : v));
+    } else if (response) {
+      const target: View = isShortResponse(response) ? 'pill-wide' : 'notepad';
+      setView((v) => {
+        const rank: View[] = ['pill', 'pill-wide', 'notepad', 'notepad-wide'];
+        return rank.indexOf(v) >= rank.indexOf(target) ? v : target;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [response, error]);
 
   // Listen for the global hotkey emitted from the Rust shell. The shell already
   // shows the window; here we toggle recording when the hotkey fires while the
@@ -168,7 +241,7 @@ export default function App() {
     setResponse(null);
     setError(null);
     setPhase('idle');
-    setPadOpen(false);
+    setView('pill');
     stream.reset();
   }, [stream]);
 
@@ -259,17 +332,20 @@ export default function App() {
       }
     } else {
       reset();
+      // Show "Listening…" the instant the mic is tapped — before the stream
+      // has even opened — so there's no dead beat where the user can't tell
+      // the mic is hot. The real recorder flips `recording` true a moment
+      // later once the socket / MediaRecorder is up.
+      setPhase('recording');
       // Try streaming first — gives interim partials and ~300ms perceived
       // latency. If the stream can't open (cloud unreachable, missing token),
       // fall back to the legacy whole-blob recorder.
       const opened = await stream.start(config);
       if (opened) {
         setUsingStream(true);
-        setPhase('recording');
       } else {
         setUsingStream(false);
         await legacyRecorder.start();
-        setPhase('recording');
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -280,16 +356,31 @@ export default function App() {
     if (recording) void toggleRecording();
   }, [recording, toggleRecording]);
 
-  // ✕ — discard the recording and return to the idle pill, no dispatch.
+  // ✕ — discard the recording and drop straight into the keyboard bar (no
+  // dispatch). Mic and keyboard are two sides of one input surface: ✕ hops
+  // from the mic side to the keyboard side without a pill flash in between.
   const cancelRecording = useCallback(async () => {
-    if (!recording) return;
-    if (usingStream) {
-      await stream.stop().catch(() => {});
-    } else {
-      await legacyRecorder.stop().catch(() => {});
+    // Also fire during the optimistic-listening gap (phase set, recorder not
+    // yet up) so ✕ is never a dead button.
+    if (!recording && phase !== 'recording') return;
+    if (recording) {
+      if (usingStream) {
+        await stream.stop().catch(() => {});
+      } else {
+        await legacyRecorder.stop().catch(() => {});
+      }
     }
     reset();
-  }, [recording, usingStream, stream, legacyRecorder, reset]);
+    setMode('keyboard');
+  }, [recording, phase, usingStream, stream, legacyRecorder, reset]);
+
+  // Hop from the keyboard bar straight into recording — no intermediate
+  // collapsed-pill step. Used by the keyboard bar's mic button.
+  const switchToMicAndRecord = useCallback(async () => {
+    if (recording) return;
+    setMode('mic');
+    await toggleRecording();
+  }, [recording, toggleRecording]);
 
   const submitKeyboard = useCallback(async () => {
     const text = keyboardText.trim();
@@ -313,30 +404,44 @@ export default function App() {
     if (phase === 'dispatching') return 'Routing…';
     if (phase === 'speaking') return 'Speaking…';
     if (mode === 'mic') {
-      if (recording) return 'Listening…';
+      if (recording || phase === 'recording') return 'Listening…';
       return 'Tap to speak';
     }
     return '';
   }, [error, phase, mode, recording]);
 
-  // A short response that didn't open the pad — shown inline in the pill.
-  const inlineResponse = response && !showPanel ? response : null;
+  // The pill bar's top row has two shapes:
+  //   • collapsed — the resting state. Four uniform icons, nothing else.
+  //   • expanded  — a wide row with the transcript / keyboard input.
+  // Responses no longer live in this row — they drop into the body below.
+  const collapsed = mode === 'mic' && !liveRecording && !liveTranscript;
+
+  // The card floats inside the (sometimes larger) window. The pill is left
+  // content-sized so it stays a compact capsule; every other view is pinned to
+  // an explicit height so its scroll area fills the window — otherwise the
+  // notepad collapses to the natural height of its content (the "thin
+  // notepad that won't stay expanded" bug).
+  const cardStyle = dragSize
+    ? { width: dragSize.w, height: dragSize.h }
+    : effectiveView === 'pill'
+      ? undefined
+      : { height: VIEW_SIZE[effectiveView][1] - 4 };
 
   return (
     <div className="flex h-screen w-screen items-start justify-center pt-1">
-      <div className="hud-no-drag relative flex w-full max-w-full flex-col overflow-hidden rounded-2xl border border-white/5 bg-slate-900/[0.92] shadow-hud backdrop-blur-hud animate-hud-in">
+      <div
+        style={cardStyle}
+        className={`hud-no-drag relative flex max-w-full flex-col overflow-hidden rounded-2xl border border-white/5 bg-slate-900/[0.92] shadow-hud backdrop-blur-hud animate-hud-in ${
+          dragSize ? '' : 'w-full'
+        }`}
+      >
         {showPanel ? (
-          // ── Scratch pad — history + long/rich responses ───────────────
+          // ── Notepad — history + long/rich responses ───────────────
           <ScratchPad
             response={error ? null : response}
             error={error}
             apiUrl={config?.apiUrl ?? 'https://ergora.cloud'}
-            onCollapse={() => {
-              setPadOpen(false);
-              // Collapsing while a long response is showing also clears it,
-              // otherwise showPanel would immediately re-open the pad.
-              if (response && !isShortResponse(response)) reset();
-            }}
+            onCollapse={() => reset()}
             onDismiss={dismiss}
             onOpenSettings={() => setShowSettings(true)}
           />
@@ -347,24 +452,29 @@ export default function App() {
             <div className="hud-drag h-2 w-full" />
 
             <div className="flex h-12 items-center gap-2 px-2.5">
-              {mode === 'mic' ? (
-                <MicButton
-                  recording={recording}
-                  level={recorderLevel}
-                  busy={phase === 'transcribing' || phase === 'dispatching'}
-                  onClick={() => void toggleRecording()}
-                />
+              {collapsed ? (
+                // ── Collapsed pill — four uniform icons, nothing else ─────
+                // Tap keyboard to type, mic to speak; both expand the bar.
+                <div className="flex w-full items-center justify-center gap-1.5">
+                  <PillIcon label="Type" onClick={() => switchMode('keyboard')}>
+                    <Keyboard className="h-4 w-4" />
+                  </PillIcon>
+                  <PillIcon label="Speak" onClick={() => void toggleRecording()}>
+                    <Mic className="h-4 w-4" />
+                  </PillIcon>
+                  <PillIcon label="Open notepad" onClick={() => setView('notepad')}>
+                    <ChevronDown className="h-4 w-4" />
+                  </PillIcon>
+                  <PillIcon label="Dismiss" onClick={dismiss}>
+                    <X className="h-4 w-4" />
+                  </PillIcon>
+                </div>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => switchMode('mic')}
-                  aria-label="Switch to mic mode"
-                  className="hud-no-drag flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/5 text-slate-200 hover:bg-white/10"
-                >
-                  <Mic className="h-4 w-4" />
-                </button>
-              )}
-
+                // ── Expanded bar — transcript / keyboard input + controls ─
+                // No left-hand record button: recording is started from the
+                // collapsed pill's mic icon, and while recording the row is
+                // just the transcript plus the cancel / finish pair.
+                <>
               <div className="min-w-0 flex-1">
                 {mode === 'keyboard' ? (
                   <KeyboardInput
@@ -373,7 +483,7 @@ export default function App() {
                     onSubmit={submitKeyboard}
                     busy={phase === 'transcribing' || phase === 'dispatching'}
                   />
-                ) : recording || liveTranscript ? (
+                ) : liveRecording || liveTranscript ? (
                   // Confirmed text in slate-200; live interim greyed out.
                   <div className="truncate text-[13px]">
                     {transcript || stream.finalText ? (
@@ -384,15 +494,6 @@ export default function App() {
                       <span className="text-slate-400">{hint}</span>
                     )}
                   </div>
-                ) : inlineResponse ? (
-                  // Short response folded inline — no pad needed.
-                  <div className="truncate text-[13px] text-slate-200">
-                    {!inlineResponse.ok
-                      ? inlineResponse.error
-                      : inlineResponse.action === 'chat'
-                        ? inlineResponse.replyText ?? inlineResponse.spoken ?? 'Thinking…'
-                        : inlineResponse.spoken}
-                  </div>
                 ) : (
                   <div className="truncate text-[13px] text-slate-400">
                     {hint || 'Tap to speak'}
@@ -401,7 +502,7 @@ export default function App() {
               </div>
 
               {/* Recording — cancel (✕) / finish (✓) pair, Wispr-style. */}
-              {recording && mode === 'mic' ? (
+              {liveRecording && mode === 'mic' ? (
                 <>
                   <button
                     type="button"
@@ -415,7 +516,7 @@ export default function App() {
                     type="button"
                     onClick={finishRecording}
                     aria-label="Finish and send"
-                    className="hud-no-drag flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ergora-amber text-slate-900 hover:bg-ergora-amber/90"
+                    className="hud-no-drag flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white hover:bg-emerald-400"
                   >
                     <Check className="h-4 w-4" />
                   </button>
@@ -436,7 +537,12 @@ export default function App() {
                   )}
                   <button
                     type="button"
-                    onClick={() => switchMode(mode === 'mic' ? 'keyboard' : 'mic')}
+                    onClick={() => {
+                      // Mic side → keyboard side, and keyboard side → straight
+                      // into recording. No collapsed-pill step in between.
+                      if (mode === 'mic') switchMode('keyboard');
+                      else void switchToMicAndRecord();
+                    }}
                     aria-label={mode === 'mic' ? 'Switch to keyboard' : 'Switch to mic'}
                     className="hud-no-drag flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-white/5 hover:text-slate-200"
                   >
@@ -446,11 +552,11 @@ export default function App() {
                       <Mic className="h-3.5 w-3.5" />
                     )}
                   </button>
-                  {/* Chevron — open the scratch pad. */}
+                  {/* Chevron — open the notepad. */}
                   <button
                     type="button"
-                    onClick={() => setPadOpen(true)}
-                    aria-label="Open scratch pad"
+                    onClick={() => setView('notepad')}
+                    aria-label="Open notepad"
                     className="hud-no-drag flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-white/5 hover:text-slate-200"
                   >
                     <ChevronDown className="h-3.5 w-3.5" />
@@ -465,16 +571,65 @@ export default function App() {
                   </button>
                 </>
               )}
+                </>
+              )}
             </div>
 
-            {missingConfig.length > 0 && (
-              <div className="border-t border-white/5 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-200">
-                Not configured — add{' '}
-                <code className="rounded bg-black/30 px-1 py-0.5">{missingConfig.join(', ')}</code>{' '}
-                to <code className="rounded bg-black/30 px-1 py-0.5">~/.ergora-remote/.env</code>.
+            {/* Response body — drops in underneath the pill bar in the
+                `pill-wide` view. A longer reply auto-promotes to the notepad
+                (handled by the response-sizing effect above). The setup
+                notice also lives here rather than as a bottom banner, which
+                would overflow the 76px pill and clip its rounded corners. */}
+            {effectiveView === 'pill-wide' && (
+              <div className="hud-scroll min-h-0 flex-1 overflow-auto border-t border-white/5 px-3.5 py-2.5 text-[13px] leading-relaxed">
+                {missingConfig.length > 0 ? (
+                  <span className="text-amber-200">
+                    Not configured — add{' '}
+                    <code className="rounded bg-black/30 px-1 py-0.5">
+                      {missingConfig.join(', ')}
+                    </code>{' '}
+                    to{' '}
+                    <code className="rounded bg-black/30 px-1 py-0.5">
+                      ~/.ergora-remote/.env
+                    </code>
+                    .
+                  </span>
+                ) : error ? (
+                  <span className="text-rose-300">{error}</span>
+                ) : response ? (
+                  <span className="text-slate-200">
+                    {!response.ok
+                      ? response.error
+                      : response.action === 'chat'
+                        ? response.replyText ?? response.spoken ?? 'Thinking…'
+                        : response.spoken}
+                  </span>
+                ) : (
+                  <span className="text-slate-500">Waiting for a response…</span>
+                )}
               </div>
             )}
           </>
+        )}
+
+        {/* Corner drag grip — pull to resize; snaps onto the four-view ladder
+            (pill / pill-wide / notepad / notepad-wide) on release. */}
+        {!liveRecording && (
+          <ResizeGrip
+            startW={dragSize ? dragSize.w : wantsBar ? 440 : VIEW_SIZE[view][0]}
+            startH={dragSize ? dragSize.h : wantsBar ? 76 : VIEW_SIZE[view][1]}
+            onStart={() =>
+              setDragSize({
+                w: wantsBar ? 440 : VIEW_SIZE[view][0],
+                h: wantsBar ? 76 : VIEW_SIZE[view][1],
+              })
+            }
+            onResize={(w, h) => setDragSize({ w, h })}
+            onEnd={(h) => {
+              setView(snapView(h));
+              setDragSize(null);
+            }}
+          />
         )}
 
         {showSettings && prefs && (
@@ -494,6 +649,104 @@ export default function App() {
         {/* Hidden audio element for TTS playback. */}
         <audio ref={audioRef} hidden />
       </div>
+    </div>
+  );
+}
+
+// A uniform icon button for the collapsed pill — all four (keyboard, mic,
+// notepad, dismiss) share one size and treatment so the resting HUD reads as
+// a clean row of equals rather than one accented control.
+function PillIcon({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className="hud-no-drag flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-white/5 hover:text-slate-100"
+    >
+      {children}
+    </button>
+  );
+}
+
+// Bottom-right corner grip.
+//
+// During a drag the OS window is parked at a fixed oversized envelope and
+// only the *card* (a plain DOM element) resizes — so this is just a CSS
+// resize: it grows and shrinks equally well, and because the window never
+// moves the cursor can't slip off it and lose the gesture.
+//
+// `finish` is wired to pointerup, pointercancel AND lostpointercapture, and
+// guarded by `done`, so the drag is always cleanly ended exactly once — the
+// HUD can never get stuck in a resizing state.
+function ResizeGrip({
+  startW,
+  startH,
+  onStart,
+  onResize,
+  onEnd,
+}: {
+  startW: number;
+  startH: number;
+  onStart: () => void;
+  onResize: (w: number, h: number) => void;
+  onEnd: (h: number) => void;
+}) {
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const sx = e.screenX;
+    const sy = e.screenY;
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    onStart();
+    let lastH = startH;
+    let done = false;
+    const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+    const move = (ev: PointerEvent) => {
+      // Card grows/shrinks centred horizontally (2px per 1px of cursor move
+      // so the grip tracks the pointer) and downward vertically.
+      const w = clamp(startW + (ev.screenX - sx) * 2, 220, 560);
+      const h = clamp(startH + (ev.screenY - sy), 76, 560);
+      lastH = h;
+      onResize(w, h);
+    };
+    const finish = () => {
+      if (done) return;
+      done = true;
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', finish);
+      el.removeEventListener('pointercancel', finish);
+      el.removeEventListener('lostpointercapture', finish);
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch {
+        /* capture already released */
+      }
+      onEnd(lastH);
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', finish);
+    el.addEventListener('pointercancel', finish);
+    el.addEventListener('lostpointercapture', finish);
+  };
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      role="separator"
+      aria-label="Resize HUD"
+      className="hud-no-drag absolute bottom-0 right-0 z-20 flex h-5 w-5 cursor-nwse-resize items-end justify-end p-1 text-slate-600 hover:text-slate-300"
+    >
+      <svg width="9" height="9" viewBox="0 0 9 9" fill="none" aria-hidden="true">
+        <path d="M9 1L1 9M9 5L5 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      </svg>
     </div>
   );
 }

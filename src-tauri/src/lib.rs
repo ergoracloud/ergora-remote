@@ -24,20 +24,50 @@ use transcription::{
 };
 
 const HUD_LABEL: &str = "hud";
-// Three window states. The HUD is a small pill at idle and only grows when
-// recording (to show the live transcript) or when the scratch pad is open.
-const PILL_HEIGHT: f64 = 56.0;
-const PANEL_HEIGHT: f64 = 360.0;
+// HUD window states. The HUD is a small pill at idle and grows on a
+// small→large ladder: pill → pill-wide → notepad → notepad-wide. The user
+// can also drag the corner grip to any size between (`set_hud_custom_size`),
+// which snaps back onto the ladder on release.
+//
+// PILL_HEIGHT is 76, not 56: the webview content is pt-1 (4) + drag handle
+// (8) + control row (48) + 1px borders ≈ 62, plus the rounded-2xl (16px)
+// bottom radius needs clearance below the content or it clips to a flat
+// edge. 76 lets every corner render so the pill reads as a clean capsule.
+// The tauri.conf.json initial window height / minHeight must match this.
+const PILL_HEIGHT: f64 = 76.0;
 const HUD_WIDTH_PILL: f64 = 220.0;
-const HUD_WIDTH_RECORDING: f64 = 420.0;
-const HUD_WIDTH_PANEL: f64 = 340.0;
+// `bar` and `pill-wide` share this width — the wide single-row bar and the
+// pill-with-response-underneath are the same footprint, different heights.
+const HUD_WIDTH_WIDE: f64 = 440.0;
+const PILL_WIDE_HEIGHT: f64 = 150.0;
+// The notepad views are square — history reads best in a roughly 1:1 box.
+const NOTEPAD_WIDTH: f64 = 360.0;
+const NOTEPAD_HEIGHT: f64 = 360.0;
+const NOTEPAD_WIDE_WIDTH: f64 = 560.0;
+const NOTEPAD_WIDE_HEIGHT: f64 = 560.0;
 const TOP_OFFSET: f64 = 12.0;
+// Drag-resize clamp envelope — smallest / largest the grip can pull to.
+const MIN_W: f64 = 220.0;
+const MAX_W: f64 = 560.0;
+const MIN_H: f64 = 76.0;
+const MAX_H: f64 = 620.0;
+// While the grip is being dragged the OS window is parked at this fixed,
+// oversized footprint and only the (transparent-margined) card inside it
+// resizes. A static window means the cursor can never slip off its own
+// window mid-drag — which is what dropped the gesture and previously froze
+// the HUD. 680² comfortably contains the largest card (560²) plus margin.
+const DRAG_ENVELOPE: f64 = 680.0;
 
-/// The three HUD window sizes, keyed by the string the JS side passes.
+/// The named HUD window sizes, keyed by the string the JS side passes.
 fn hud_dimensions(state: &str) -> (f64, f64) {
     match state {
-        "recording" => (HUD_WIDTH_RECORDING, PILL_HEIGHT),
-        "panel" => (HUD_WIDTH_PANEL, PANEL_HEIGHT),
+        // Transient wide single-row bar (recording / typing, no response yet).
+        "bar" | "recording" => (HUD_WIDTH_WIDE, PILL_HEIGHT),
+        "pill-wide" => (HUD_WIDTH_WIDE, PILL_WIDE_HEIGHT),
+        "notepad" | "panel" => (NOTEPAD_WIDTH, NOTEPAD_HEIGHT),
+        "notepad-wide" => (NOTEPAD_WIDE_WIDTH, NOTEPAD_WIDE_HEIGHT),
+        // Static oversized window used only for the duration of a grip-drag.
+        "drag" => (DRAG_ENVELOPE, DRAG_ENVELOPE),
         // "pill" and any unknown value fall back to the compact idle pill.
         _ => (HUD_WIDTH_PILL, PILL_HEIGHT),
     }
@@ -143,6 +173,27 @@ async fn set_hud_size<R: Runtime>(app: AppHandle<R>, state: String) -> Result<()
         .set_size(LogicalSize::new(width, height))
         .map_err(|e| e.to_string())?;
     // After a resize the window may shift; re-center on the active monitor.
+    position_on_active_monitor(&window).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Free-form resize used while the user drags the corner grip. The width /
+/// height are clamped to the [MIN..MAX] envelope, then the window is
+/// re-centred so it stays pinned to the top edge as it grows.
+#[tauri::command]
+async fn set_hud_custom_size<R: Runtime>(
+    app: AppHandle<R>,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let Some(window) = get_hud_window(&app) else {
+        return Err("HUD window not found".into());
+    };
+    let w = width.clamp(MIN_W, MAX_W);
+    let h = height.clamp(MIN_H, MAX_H);
+    window
+        .set_size(LogicalSize::new(w, h))
+        .map_err(|e| e.to_string())?;
     position_on_active_monitor(&window).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -301,6 +352,7 @@ pub fn run() {
             show_hud,
             hide_hud,
             set_hud_size,
+            set_hud_custom_size,
             set_hud_expanded,
             recenter_hud,
             set_global_hotkey,

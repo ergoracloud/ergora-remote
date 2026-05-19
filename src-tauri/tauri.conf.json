@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "cloud.ergora.hud",
   "build": {
-    "beforeDevCommand": "npm --prefix ../hud run dev",
+    "beforeDevCommand": "npm --prefix hud run dev",
     "devUrl": "http://localhost:1421",
-    "beforeBuildCommand": "npm --prefix ../hud run build",
+    "beforeBuildCommand": "npm --prefix hud run build",
     "frontendDist": "../hud/dist"
   },
   "app": {
@@ -16,10 +16,10 @@
         "label": "hud",
         "title": "Ergora HUD",
         "width": 220,
-        "height": 56,
-        "minHeight": 56,
+        "height": 76,
+        "minHeight": 76,
         "minWidth": 200,
-        "maxHeight": 480,
+        "maxHeight": 700,
         "maxWidth": 960,
         "resizable": false,
         "fullscreen": false,
@@ -38,12 +38,19 @@
     ],
     "security": {
       "csp": null,
-      "capabilities": ["default"]
+      "capabilities": [
+        "default"
+      ]
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "msi", "appimage"],
+    "targets": [
+      "app",
+      "dmg",
+      "msi",
+      "appimage"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -52,7 +59,7 @@
       "icons/icon.ico"
     ],
     "category": "Productivity",
-    "shortDescription": "Ergora HUD — voice + keyboard top-bar for your workspace",
+    "shortDescription": "Ergora HUD \u2014 voice + keyboard top-bar for your workspace",
     "longDescription": "Ergora HUD is the always-available top-of-screen overlay that lets you talk to your Ergora workspace from anywhere on your machine. Press the global hotkey, dictate or type, and let your Intern handle the rest.",
     "macOS": {
       "minimumSystemVersion": "11.0",
@@ -70,20 +77,5 @@
       }
     }
   },
-  "plugins": {
-    "global-shortcut": {},
-    "fs": {
-      "scope": ["$APPDATA/*", "$HOME/.ergora-remote/*", "$HOME/.ergora-remote/.env"]
-    },
-    "http": {
-      "scope": [
-        "https://ergora.cloud/*",
-        "https://*.ergora.cloud/*",
-        "http://localhost:*"
-      ]
-    },
-    "shell": {
-      "open": true
-    }
-  }
+  "plugins": {}
 }

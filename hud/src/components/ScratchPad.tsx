@@ -1,4 +1,4 @@
-// Scratch pad — the HUD's ~340x360 expanded panel.
+// Notepad — the HUD's ~340x360 expanded panel.
 //
 // Two jobs:
 //   1. Show a fresh agent response (long replies expand here instead of the
@@ -77,7 +77,7 @@ export function ScratchPad({
         </button>
         <span className="flex flex-1 items-center gap-1.5 text-[11px] uppercase tracking-wide text-slate-500">
           <HistoryIcon className="h-3.5 w-3.5" />
-          Scratch pad
+          Notepad
         </span>
         <button
           type="button"

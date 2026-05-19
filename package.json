@@ -11,7 +11,8 @@
     "hud:install": "npm --prefix hud install",
     "hud:dev": "tauri dev --config src-tauri/tauri.conf.json",
     "hud:build": "tauri build --config src-tauri/tauri.conf.json",
-    "hud:bundle:mac": "tauri build --config src-tauri/tauri.conf.json --target universal-apple-darwin"
+    "hud:bundle:mac": "tauri build --config src-tauri/tauri.conf.json --target universal-apple-darwin",
+    "tauri": "tauri --config src-tauri/tauri.conf.json"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.55.0",

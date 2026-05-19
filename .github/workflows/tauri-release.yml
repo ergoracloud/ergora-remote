@@ -129,8 +129,8 @@ jobs:
           # through. tauriScript reads our package.json scripts. The build
           # picks up tauri.conf.json from src-tauri/.
           projectPath: '.'
-          # Reuse the existing hud:build script (it already passes our custom
-          # --config src-tauri/tauri.conf.json). The action appends `args`
-          # after `--`, so `npm run hud:build -- --target …` is what runs.
-          tauriScript: 'npm run hud:build --'
+          # The action runs `<tauriScript> build <args>`. Our `tauri` script
+          # injects the custom --config; the action appends the `build`
+          # subcommand and any --target argument from the matrix.
+          tauriScript: 'npm run tauri --'
           args: ${{ matrix.args }}

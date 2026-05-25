@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Partial Info.plist merged into the bundle's generated Info.plist at build
+  time by the Tauri bundler. Anything declared here either adds a key or
+  overrides the bundler default of the same name.
+
+  Why this exists:
+    macOS requires NSMicrophoneUsageDescription for ANY app that requests
+    microphone access. Without it the system silently denies the mic
+    (no prompt, no error) and recordings produce no audio. The Ergora HUD
+    is a dictation-first product, so this is non-negotiable.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Ergora HUD needs microphone access so you can dictate commands and have them transcribed in real time.</string>
+
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Ergora HUD transcribes your speech to send commands to your Ergora workspace.</string>
+
+  <!-- Belt-and-braces: also set NSCameraUsageDescription so any future
+       screen-capture / camera feature doesn't crash the app the same way. -->
+  <key>NSCameraUsageDescription</key>
+  <string>Ergora HUD will use the camera only if you opt in to camera-based features.</string>
+</dict>
+</plist>

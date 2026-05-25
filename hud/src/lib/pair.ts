@@ -85,10 +85,13 @@ export async function setupPairListener(opts: {
   }
 
   // 2) Steady-state case: app already running, OS routes the URL to it.
-  //    Both paths are wired up because tauri-plugin-deep-link's automatic
-  //    JS forwarding doesn't reliably fire on macOS warm-path — the Rust
-  //    setup hook in src-tauri/src/lib.rs explicitly emits `deep-link-url`
-  //    as a belt-and-braces fallback, and we subscribe to both.
+  //    Three subscriptions wired up because each layer has been observed
+  //    to silently no-op on macOS warm-path:
+  //      • `onOpenUrl`        — the plugin's intended JS entry point
+  //      • `deep-link-url`    — Rust forwarder emit, JS does its own write
+  //      • `deep-link-paired` — Rust already wrote the .env, just refresh
+  //    The Rust path is the canonical one; the JS write is best-effort
+  //    and idempotent (re-writes the same token).
   const pluginUnlisten = await onOpenUrl((urls) => {
     for (const u of urls) {
       void handle(u);
@@ -97,10 +100,17 @@ export async function setupPairListener(opts: {
   const eventUnlisten = await listen<string>('deep-link-url', (e) => {
     if (typeof e.payload === 'string') void handle(e.payload);
   });
+  // Rust has already persisted the token — just refresh config.
+  // Calling onPaired with an empty token is fine: callers don't depend
+  // on the value, they call refreshConfig() which re-reads the file.
+  const pairedUnlisten = await listen<null>('deep-link-paired', () => {
+    opts.onPaired('');
+  });
 
   return () => {
     pluginUnlisten();
     eventUnlisten();
+    pairedUnlisten();
   };
 }
 

@@ -73,6 +73,46 @@ fn hud_dimensions(state: &str) -> (f64, f64) {
     }
 }
 
+/// Persist an `eal_…` agent token to `~/.ergora-remote/.env` from Rust.
+///
+/// Called by the deep-link handler when a `ergora-remote://pair?token=…`
+/// URL arrives. We do the write here instead of from JS because the
+/// tauri-plugin-fs scope and the deep-link → JS event bridge have both
+/// been observed to silently no-op on macOS warm-path callbacks. A direct
+/// std::fs write has no such caveats.
+///
+/// Preserves any other keys already in the file and replaces an existing
+/// `ERGORA_AGENT_TOKEN=` line if one is there.
+fn write_agent_token(token: &str) -> std::io::Result<String> {
+    use std::io::ErrorKind;
+    let home = std::env::var("HOME")
+        .map_err(|_| std::io::Error::new(ErrorKind::NotFound, "HOME not set"))?;
+    let dir = std::path::PathBuf::from(&home).join(".ergora-remote");
+    std::fs::create_dir_all(&dir)?;
+    let env_path = dir.join(".env");
+    let existing = std::fs::read_to_string(&env_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+    let mut updated = false;
+    for line in lines.iter_mut() {
+        if line.trim_start().starts_with("ERGORA_AGENT_TOKEN=") {
+            *line = format!("ERGORA_AGENT_TOKEN={}", token);
+            updated = true;
+            break;
+        }
+    }
+    if !updated {
+        lines.push(format!("ERGORA_AGENT_TOKEN={}", token));
+    }
+    // Always end with exactly one newline.
+    while matches!(lines.last(), Some(l) if l.is_empty()) {
+        lines.pop();
+    }
+    let mut content = lines.join("\n");
+    content.push('\n');
+    std::fs::write(&env_path, content)?;
+    Ok(env_path.to_string_lossy().into_owned())
+}
+
 fn get_hud_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
     app.get_webview_window(HUD_LABEL)
 }
@@ -388,15 +428,12 @@ pub fn run() {
             transcription_capabilities,
         ])
         .setup(|app| {
-            // ── Deep-link forwarder ─────────────────────────────────────
-            // The tauri-plugin-deep-link plugin's automatic webview
-            // forwarding is flaky on macOS for the warm path (tao receives
-            // `application:openURLs:` but the plugin's internal listener
-            // doesn't always relay it to JS — we observed this empirically
-            // with `tauri-plugin-deep-link` 2.4.9). Install our own Rust
-            // handler that emits a regular Tauri event the webview can
-            // listen for. JS subscribes to both `onOpenUrl` AND this
-            // belt-and-braces event so warm + cold paths both work.
+            // ── Deep-link handler ───────────────────────────────────────
+            // tauri-plugin-deep-link 2.4.9 receives URLs on macOS (verified
+            // via tao trace logs) but its JS forwarding is unreliable on the
+            // warm path. Do the token persistence *in Rust* directly — a
+            // synchronous file write with no plugin / scope / async pitfalls
+            // — then emit a Tauri event so JS can refresh its config view.
             {
                 use tauri::Emitter;
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -405,6 +442,37 @@ pub fn run() {
                     for url in event.urls() {
                         let s = url.to_string();
                         log::info!("[deep-link] received: {}", s);
+                        // host == "pair" is the only callback shape we care
+                        // about; anything else is ignored.
+                        let route = url.host_str().unwrap_or("");
+                        if route != "pair" {
+                            continue;
+                        }
+                        let token = url
+                            .query_pairs()
+                            .find(|(k, _)| k == "token")
+                            .map(|(_, v)| v.to_string());
+                        let Some(token) = token else { continue };
+                        if !token.starts_with("eal_") {
+                            log::warn!("[deep-link] token missing eal_ prefix; ignoring");
+                            continue;
+                        }
+                        match write_agent_token(&token) {
+                            Ok(path) => {
+                                log::info!("[deep-link] token persisted to {}", path);
+                                let _ = handle.emit("deep-link-paired", ());
+                            }
+                            Err(err) => {
+                                log::error!("[deep-link] failed to persist token: {}", err);
+                                let _ = handle.emit(
+                                    "deep-link-pair-error",
+                                    format!("{}", err),
+                                );
+                            }
+                        }
+                        // Backwards-compatible — JS still listens here as a
+                        // belt-and-braces, even though the write already
+                        // happened in Rust.
                         let _ = handle.emit("deep-link-url", s);
                     }
                 });

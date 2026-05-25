@@ -125,24 +125,33 @@ fn get_hud_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
 fn position_on_active_monitor<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
     let cursor_pos = window.cursor_position().ok();
     let monitors = window.available_monitors()?;
-    let monitor = if let Some(pos) = cursor_pos {
-        monitors
-            .iter()
-            .find(|m| {
-                let mp = m.position();
-                let ms = m.size();
-                let x = pos.x as i32;
-                let y = pos.y as i32;
-                x >= mp.x
-                    && x <= mp.x + ms.width as i32
-                    && y >= mp.y
-                    && y <= mp.y + ms.height as i32
-            })
-            .cloned()
-            .or_else(|| monitors.first().cloned())
-    } else {
-        monitors.first().cloned()
-    };
+
+    // Monitor selection order, most-preferred first:
+    //   1. The monitor the cursor is currently on (matches "the screen the
+    //      user is interacting with").
+    //   2. The system's primary monitor (matches the macOS Display Arrangement
+    //      "primary" — typically the screen the menu bar lives on).
+    //   3. monitors.first() as a final fallback — unordered on macOS, was
+    //      previously the second choice and produced the off-screen HUD
+    //      bug on Tom's 3-monitor setup.
+    let monitor = cursor_pos
+        .and_then(|pos| {
+            monitors
+                .iter()
+                .find(|m| {
+                    let mp = m.position();
+                    let ms = m.size();
+                    let x = pos.x as i32;
+                    let y = pos.y as i32;
+                    x >= mp.x
+                        && x <= mp.x + ms.width as i32
+                        && y >= mp.y
+                        && y <= mp.y + ms.height as i32
+                })
+                .cloned()
+        })
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .or_else(|| monitors.first().cloned());
 
     let Some(monitor) = monitor else { return Ok(()) };
     let scale = monitor.scale_factor();

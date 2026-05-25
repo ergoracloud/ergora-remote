@@ -155,10 +155,17 @@ export default function App() {
     const status = await loadConfig();
     setConfig(status.config);
     setMissingConfig(status.missing);
-    // An unconfigured HUD opens into pill-wide so the Sign-in surface has a
-    // proper body to render in (a bottom banner on the 76px pill overflows
-    // and clips the rounded corners).
-    if (status.missing.length > 0) setView((v) => (v === 'pill' ? 'pill-wide' : v));
+    if (status.missing.length > 0) {
+      // Unconfigured HUD opens into pill-wide so the Sign-in surface has a
+      // proper body to render in (a bottom banner on the 76px pill overflows
+      // and clips the rounded corners).
+      setView((v) => (v === 'pill' ? 'pill-wide' : v));
+    } else {
+      // Just-paired HUD: if we're still showing the Sign-in surface in the
+      // expanded pill, collapse back to the resting 4-icon pill so the user
+      // sees the success state without a quit/relaunch.
+      setView((v) => (v === 'pill-wide' ? 'pill' : v));
+    }
     return status;
   }, []);
 

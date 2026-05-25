@@ -117,8 +117,29 @@ fn position_on_active_monitor<R: Runtime>(window: &WebviewWindow<R>) -> tauri::R
         .unwrap_or(HUD_WIDTH_PILL);
     let logical_width = ms.width as f64 / scale;
     let x_logical = (logical_width - hud_width) / 2.0;
-    let x_physical = mp.x + (x_logical * scale).round() as i32;
-    let y_physical = mp.y + (TOP_OFFSET * scale).round() as i32;
+    let mut x_physical = mp.x + (x_logical * scale).round() as i32;
+    let mut y_physical = mp.y + (TOP_OFFSET * scale).round() as i32;
+
+    // Defensive clamp — keep the window fully within the chosen monitor's
+    // bounds. The centering math above is correct in single-monitor /
+    // single-scale-factor cases, but observed on Mac mini first-launch:
+    // the window occasionally lands at the top-right edge of the screen,
+    // half-clipped. Until we root-cause that (probably outer_size returning
+    // a stale value before the post-resize repositioning), clamping
+    // guarantees the window can never end up off-screen.
+    let win_w_phys = (hud_width * scale).round() as i32;
+    let max_x = mp.x + ms.width as i32 - win_w_phys;
+    if max_x > mp.x {
+        x_physical = x_physical.clamp(mp.x, max_x);
+    }
+    let win_h_phys = window
+        .outer_size()
+        .map(|s| s.height as i32)
+        .unwrap_or((PILL_HEIGHT * scale) as i32);
+    let max_y = mp.y + ms.height as i32 - win_h_phys;
+    if max_y > mp.y {
+        y_physical = y_physical.clamp(mp.y, max_y);
+    }
 
     window.set_position(PhysicalPosition::new(x_physical, y_physical))?;
     Ok(())
@@ -367,6 +388,28 @@ pub fn run() {
             transcription_capabilities,
         ])
         .setup(|app| {
+            // ── Deep-link forwarder ─────────────────────────────────────
+            // The tauri-plugin-deep-link plugin's automatic webview
+            // forwarding is flaky on macOS for the warm path (tao receives
+            // `application:openURLs:` but the plugin's internal listener
+            // doesn't always relay it to JS — we observed this empirically
+            // with `tauri-plugin-deep-link` 2.4.9). Install our own Rust
+            // handler that emits a regular Tauri event the webview can
+            // listen for. JS subscribes to both `onOpenUrl` AND this
+            // belt-and-braces event so warm + cold paths both work.
+            {
+                use tauri::Emitter;
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        let s = url.to_string();
+                        log::info!("[deep-link] received: {}", s);
+                        let _ = handle.emit("deep-link-url", s);
+                    }
+                });
+            }
+
             // Register the default global hotkey once the app is ready.
             // The user can override it from the settings panel via
             // `set_global_hotkey`.

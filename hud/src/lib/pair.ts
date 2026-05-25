@@ -16,6 +16,7 @@
 
 import { onOpenUrl, getCurrent } from '@tauri-apps/plugin-deep-link';
 import { open as openExternal } from '@tauri-apps/plugin-shell';
+import { listen } from '@tauri-apps/api/event';
 import { saveAgentToken } from './config';
 
 export interface PairResult {
@@ -84,13 +85,23 @@ export async function setupPairListener(opts: {
   }
 
   // 2) Steady-state case: app already running, OS routes the URL to it.
-  const unlisten = await onOpenUrl((urls) => {
+  //    Both paths are wired up because tauri-plugin-deep-link's automatic
+  //    JS forwarding doesn't reliably fire on macOS warm-path — the Rust
+  //    setup hook in src-tauri/src/lib.rs explicitly emits `deep-link-url`
+  //    as a belt-and-braces fallback, and we subscribe to both.
+  const pluginUnlisten = await onOpenUrl((urls) => {
     for (const u of urls) {
       void handle(u);
     }
   });
+  const eventUnlisten = await listen<string>('deep-link-url', (e) => {
+    if (typeof e.payload === 'string') void handle(e.payload);
+  });
 
-  return unlisten;
+  return () => {
+    pluginUnlisten();
+    eventUnlisten();
+  };
 }
 
 /**

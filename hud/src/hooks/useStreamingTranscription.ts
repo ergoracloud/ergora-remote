@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
 import type { ErgoraConfig } from '../lib/config';
 
 export interface StreamingOptions {
@@ -140,6 +141,9 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
   const stop = useCallback(async (): Promise<string> => {
     if (stopGuardRef.current) return finalRef.current || interimRef.current;
     stopGuardRef.current = true;
+    void logInfo(
+      `[stream] stop: final="${finalRef.current}" interim="${interimRef.current}"`,
+    );
 
     return new Promise<string>((resolve) => {
       finalResolveRef.current = resolve;
@@ -211,7 +215,10 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
       reset();
       stopGuardRef.current = false;
 
-      // Acquire mic.
+      // ── Mic acquisition. Logged at every step so we can diagnose mic
+      // problems by tailing the Tauri log file instead of asking the user
+      // to be the smoke tester.
+      void logInfo('[stream] start: requesting getUserMedia');
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -221,8 +228,20 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
             autoGainControl: true,
           },
         });
+        const tracks = stream.getAudioTracks();
+        void logInfo(
+          `[stream] getUserMedia OK — tracks=${tracks.length} ` +
+            tracks
+              .map(
+                (t) =>
+                  `{label="${t.label}" enabled=${t.enabled} muted=${t.muted} state=${t.readyState}}`,
+              )
+              .join(' '),
+        );
       } catch (err) {
-        setError((err as Error).message || 'mic permission denied');
+        const msg = (err as Error).message || String(err);
+        void logError(`[stream] getUserMedia FAILED: ${msg}`);
+        setError(msg || 'mic permission denied');
         return false;
       }
       streamRef.current = stream;

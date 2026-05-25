@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Ergora HUD",
+  "productName": "Ergora Remote",
   "version": "0.1.0",
   "identifier": "cloud.ergora.hud",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "hud",
-        "title": "Ergora HUD",
+        "title": "Ergora Remote",
         "width": 220,
         "height": 76,
         "minHeight": 76,
@@ -59,8 +59,8 @@
       "icons/icon.ico"
     ],
     "category": "Productivity",
-    "shortDescription": "Ergora HUD \u2014 voice + keyboard top-bar for your workspace",
-    "longDescription": "Ergora HUD is the always-available top-of-screen overlay that lets you talk to your Ergora workspace from anywhere on your machine. Press the global hotkey, dictate or type, and let your Intern handle the rest.",
+    "shortDescription": "Ergora Remote \u2014 voice + keyboard top-bar for your workspace",
+    "longDescription": "Ergora Remote is the always-available top-of-screen overlay that lets you talk to your Ergora workspace from anywhere on your machine. Press the global hotkey, dictate or type, and let your Intern handle the rest.",
     "macOS": {
       "minimumSystemVersion": "11.0",
       "exceptionDomain": "",

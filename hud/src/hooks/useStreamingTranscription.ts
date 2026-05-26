@@ -1,33 +1,36 @@
-// Live streaming transcription, JS side.
+// Live transcription — JS side.
 //
-// Pairs with `src-tauri/src/transcription.rs`. The hook owns:
-//   • A MediaRecorder feeding webm/opus chunks to Rust as they arrive.
-//   • An AnalyserNode for the mic-level pulse and silence-triggered stop.
-//   • Tauri event listeners for `transcribe-partial` / `transcribe-final` /
-//     `transcribe-error` so the React layer can render words live.
+// REWRITTEN 2026-05-26: this used to drive a MediaRecorder → Rust streaming
+// pipe → /api/transcribe/stream → Google STT, but every step in that chain
+// had real-world failure modes (WKWebView MediaRecorder framing, Rust
+// duplex-pipe timing, Google STT mis-finalising the first chunk). The
+// Ergora portal solved the same problem by just using the browser's built-in
+// `webkitSpeechRecognition` — instant interim words, zero round-trips,
+// proven to work in WebKit. Tauri's WKWebView is the same WebKit, so we
+// mirror the portal exactly.
 //
-// State exposed:
-//   • `recording`         — true between start() and stop()
-//   • `interim`           — most recent partial hypothesis (greyed-out text)
-//   • `final` / `result`  — confirmed transcript on completion
-//   • `level`             — 0..1 mic level for the visual pulse
+// State exposed (unchanged so callers don't break):
+//   • recording  — true between start() and stop()
+//   • interim    — current partial hypothesis (greyed-out text)
+//   • finalText  — confirmed transcript on completion
+//   • level      — 0 (placeholder; the visual pulse was removed in the
+//                  redesign and callers no longer read this, but the field
+//                  stays for API stability)
+//   • error      — non-null if SR isn't available or permission denied
 //
-// Notes:
-//   • If the Rust side returns an error opening the stream, we fall back to
-//     buffer-the-whole-thing-and-POST behaviour at the call site (the App
-//     keeps the legacy useRecorder around).
-//   • `start()` requires the Ergora cloud config — it reads agentToken +
-//     apiUrl off the passed-in `ErgoraConfig`.
-//   • Auto-stops after `silenceMs` of continuous silence below
-//     `silenceThreshold` (RMS), or after `maxMs` total recording.
+// macOS: requires `NSSpeechRecognitionUsageDescription` (already in
+// src-tauri/Info.plist). User grants on first run via the system dialog.
+// Linux (webkit2gtk): SpeechRecognition support is patchy; if it's
+// unavailable, start() returns false and the caller falls back to the
+// MediaRecorder→/api/transcribe path that's still in useRecorder.ts.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useCallback, useRef, useState } from 'react';
 import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
 import type { ErgoraConfig } from '../lib/config';
 
 export interface StreamingOptions {
+  /** Kept for API compat — no longer enforced; the browser SR engine
+   * decides when to auto-finalise. */
   silenceMs?: number;
   silenceThreshold?: number;
   maxMs?: number;
@@ -39,369 +42,150 @@ export interface StreamingHandle {
   finalText: string;
   level: number;
   error: string | null;
-  start: (cfg: ErgoraConfig) => Promise<boolean>; // resolves true if stream opened, false on fallback
-  stop: () => Promise<string>; // returns the final transcript
+  start: (cfg: ErgoraConfig) => Promise<boolean>;
+  stop: () => Promise<string>;
   reset: () => void;
 }
 
-interface PartialPayload {
-  sessionId: string;
-  text: string;
+// Minimal subset of the spec types — DOM lib types for SpeechRecognition
+// aren't always present in TS configs, so we shape them ourselves.
+type SRResultItem = { transcript: string };
+type SRResult = { isFinal: boolean; 0: SRResultItem } & { [k: number]: SRResultItem };
+type SREvent = { results: ArrayLike<SRResult> };
+type SRErrorEvent = { error?: string };
+type SR = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((e: SREvent) => void) | null;
+  onerror: ((e: SRErrorEvent) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+
+function getSRCtor(): { new (): SR } | null {
+  if (typeof window === 'undefined') return null;
+  const w = window as unknown as {
+    SpeechRecognition?: { new (): SR };
+    webkitSpeechRecognition?: { new (): SR };
+  };
+  return (w.SpeechRecognition || w.webkitSpeechRecognition) ?? null;
 }
 
-interface ErrorPayload {
-  sessionId: string;
-  error: string;
-}
-
-const PREFERRED_MIME_TYPES = [
-  'audio/webm;codecs=opus',
-  'audio/webm',
-  'audio/ogg;codecs=opus',
-  'audio/mp4',
-];
-
-function pickMimeType(): string {
-  for (const mt of PREFERRED_MIME_TYPES) {
-    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mt)) {
-      return mt;
-    }
-  }
-  return 'audio/webm';
-}
-
-export function useStreamingTranscription(opts: StreamingOptions = {}): StreamingHandle {
-  // 2500ms, not 1200: a 1.2s window cut the user off on a natural mid-thought
-  // pause, and snapped the HUD shut almost immediately if they hadn't started
-  // speaking yet. 2.5s leaves room to think without feeling laggy.
-  const { silenceMs = 2500, silenceThreshold = 0.012, maxMs = 30_000 } = opts;
-
+export function useStreamingTranscription(_opts: StreamingOptions = {}): StreamingHandle {
   const [recording, setRecording] = useState(false);
   const [interim, setInterim] = useState('');
   const [finalText, setFinalText] = useState('');
-  const [level, setLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  const sessionRef = useRef<string | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const silenceStartRef = useRef<number | null>(null);
-  const startedAtRef = useRef<number>(0);
+  const recognitionRef = useRef<SR | null>(null);
+  const latestRef = useRef<string>(''); // running combined transcript
   const finalResolveRef = useRef<((v: string) => void) | null>(null);
-  const unlistenersRef = useRef<UnlistenFn[]>([]);
-  const stopGuardRef = useRef(false);
-  // Stable refs holding the most recent text — needed because the silence
-  // detector and the SSE error listener both read these from stale closures.
-  const interimRef = useRef('');
-  const finalRef = useRef('');
-
-  const teardownAudio = useCallback(() => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    audioCtxRef.current?.close().catch(() => {});
-    audioCtxRef.current = null;
-    analyserRef.current = null;
-    silenceStartRef.current = null;
-    setLevel(0);
-  }, []);
-
-  const detachListeners = useCallback(() => {
-    for (const u of unlistenersRef.current) {
-      try {
-        u();
-      } catch {
-        /* listener already torn down */
-      }
-    }
-    unlistenersRef.current = [];
-  }, []);
 
   const reset = useCallback(() => {
     setInterim('');
     setFinalText('');
     setError(null);
-    interimRef.current = '';
-    finalRef.current = '';
+    latestRef.current = '';
   }, []);
 
-  // Mirror state to refs so off-render callers (silence loop, SSE listeners)
-  // always see the latest value.
-  useEffect(() => {
-    interimRef.current = interim;
-  }, [interim]);
-  useEffect(() => {
-    finalRef.current = finalText;
-  }, [finalText]);
-
   const stop = useCallback(async (): Promise<string> => {
-    if (stopGuardRef.current) return finalRef.current || interimRef.current;
-    stopGuardRef.current = true;
-    void logInfo(
-      `[stream] stop: final="${finalRef.current}" interim="${interimRef.current}"`,
-    );
-
+    const rec = recognitionRef.current;
+    if (!rec) {
+      // Nothing to stop — return what we have.
+      return latestRef.current;
+    }
     return new Promise<string>((resolve) => {
       finalResolveRef.current = resolve;
-      const rec = recorderRef.current;
-      const sid = sessionRef.current;
-
-      if (rec && rec.state !== 'inactive') {
+      // .stop() lets the final result fire one last `onresult` and then
+      // `onend`. .abort() would drop the last partial. We want the last word.
+      try {
         rec.stop();
-      } else {
-        // No active recorder — just resolve with whatever we have.
-        resolve(finalRef.current || interimRef.current || '');
+      } catch {
+        // Already stopped — resolve with current text.
+        resolve(latestRef.current);
         finalResolveRef.current = null;
       }
-
-      // Tell Rust to flush the stream. Independent of MediaRecorder.onstop so
-      // the final SSE event still arrives even if the recorder never fired.
-      if (sid) {
-        invoke('stop_transcription_stream', { sessionId: sid }).catch((err) => {
-          console.warn('[stream] stop failed', err);
-        });
-      }
-
-      // Safety net — if the server never emits `final`, resolve after 5s
-      // with the latest interim.
-      setTimeout(() => {
-        if (finalResolveRef.current) {
-          const fallback = finalRef.current || interimRef.current || '';
-          finalResolveRef.current(fallback);
-          finalResolveRef.current = null;
-        }
-      }, 5000);
     });
   }, []);
 
-  const tickAnalyser = useCallback(() => {
-    const an = analyserRef.current;
-    if (!an) return;
-    const buf = new Uint8Array(an.fftSize);
-    an.getByteTimeDomainData(buf);
-    let sum = 0;
-    for (let i = 0; i < buf.length; i++) {
-      const v = (buf[i] - 128) / 128;
-      sum += v * v;
-    }
-    const rms = Math.sqrt(sum / buf.length);
-    setLevel(Math.min(1, rms * 4));
-
-    const now = performance.now();
-    if (rms < silenceThreshold) {
-      if (silenceStartRef.current === null) silenceStartRef.current = now;
-      else if (now - silenceStartRef.current > silenceMs) {
-        void stop();
-        return;
-      }
-    } else {
-      silenceStartRef.current = null;
-    }
-
-    if (now - startedAtRef.current > maxMs) {
-      void stop();
-      return;
-    }
-
-    rafRef.current = requestAnimationFrame(tickAnalyser);
-  }, [silenceMs, silenceThreshold, maxMs, stop]);
-
   const start = useCallback(
-    async (cfg: ErgoraConfig): Promise<boolean> => {
+    async (_cfg: ErgoraConfig): Promise<boolean> => {
       reset();
-      stopGuardRef.current = false;
-
-      // ── Mic acquisition. Logged at every step so we can diagnose mic
-      // problems by tailing the Tauri log file instead of asking the user
-      // to be the smoke tester.
-      void logInfo('[stream] start: requesting getUserMedia');
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-        const tracks = stream.getAudioTracks();
-        void logInfo(
-          `[stream] getUserMedia OK — tracks=${tracks.length} ` +
-            tracks
-              .map(
-                (t) =>
-                  `{label="${t.label}" enabled=${t.enabled} muted=${t.muted} state=${t.readyState}}`,
-              )
-              .join(' '),
-        );
-      } catch (err) {
-        const msg = (err as Error).message || String(err);
-        void logError(`[stream] getUserMedia FAILED: ${msg}`);
-        setError(msg || 'mic permission denied');
+      const SRCtor = getSRCtor();
+      if (!SRCtor) {
+        void logError('[stream] SpeechRecognition not available in this webview');
+        setError('Speech recognition not available.');
         return false;
       }
-      streamRef.current = stream;
-
-      // Audio analyser for level + silence detection.
-      const ctx = new AudioContext();
-      audioCtxRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 512;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      const mimeType = pickMimeType();
-
-      // Open the Rust streaming session. If this fails (e.g. cloud
-      // unreachable), bail out — caller falls back to whole-blob transcribe.
-      void logInfo(
-        `[stream] invoke start_transcription_stream — apiUrl="${cfg.apiUrl}" ` +
-          `tokenLen=${(cfg.agentToken ?? '').length} ` +
-          `tokenPrefix="${(cfg.agentToken ?? '').slice(0, 8)}" ` +
-          `tokenTail="${(cfg.agentToken ?? '').slice(-6)}"`,
-      );
-      let sessionId: string;
       try {
-        sessionId = await invoke<string>('start_transcription_stream', {
-          apiUrl: cfg.apiUrl,
-          authToken: cfg.agentToken,
-          mimeType,
-        });
+        const rec = new SRCtor();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = 'en-GB';
+
+        rec.onresult = (event) => {
+          let allFinal = '';
+          let interimText = '';
+          for (let i = 0; i < event.results.length; i++) {
+            const r = event.results[i];
+            if (r.isFinal) allFinal += r[0].transcript + ' ';
+            else interimText += r[0].transcript;
+          }
+          const combined = (allFinal + interimText).replace(/\s+/g, ' ').trimEnd();
+          latestRef.current = combined;
+          setInterim(combined);
+        };
+
+        rec.onerror = (e) => {
+          const code = e?.error ?? 'unknown';
+          void logError(`[stream] SpeechRecognition error: ${code}`);
+          if (code === 'not-allowed' || code === 'service-not-allowed') {
+            setError('Microphone permission denied.');
+          } else if (code === 'no-speech') {
+            // Soft — user just hadn't said anything yet.
+          } else if (code !== 'aborted') {
+            setError('Speech recognition error.');
+          }
+        };
+
+        rec.onend = () => {
+          void logInfo(`[stream] SpeechRecognition onend — final="${latestRef.current}"`);
+          setRecording(false);
+          // Promote the running latest into finalText so the App can read it
+          // off either field.
+          setFinalText(latestRef.current);
+          recognitionRef.current = null;
+          if (finalResolveRef.current) {
+            finalResolveRef.current(latestRef.current);
+            finalResolveRef.current = null;
+          }
+        };
+
+        void logInfo('[stream] starting webkitSpeechRecognition');
+        rec.start();
+        recognitionRef.current = rec;
+        setRecording(true);
+        return true;
       } catch (err) {
-        setError(`stream open failed: ${(err as Error).message ?? err}`);
-        teardownAudio();
+        void logError(`[stream] start failed: ${(err as Error).message}`);
+        setError((err as Error).message);
         return false;
       }
-      sessionRef.current = sessionId;
-      void logInfo(`[stream] sessionRef set to ${sessionId.slice(0, 8)}…`);
-
-      // Listen for partial / final events scoped to this session.
-      const partialUnlisten = await listen<PartialPayload>('transcribe-partial', (e) => {
-        if (e.payload.sessionId !== sessionId) return;
-        setInterim(e.payload.text);
-      });
-      const finalUnlisten = await listen<PartialPayload>('transcribe-final', (e) => {
-        if (e.payload.sessionId !== sessionId) return;
-        setFinalText(e.payload.text);
-        setInterim('');
-        if (finalResolveRef.current) {
-          finalResolveRef.current(e.payload.text);
-          finalResolveRef.current = null;
-        }
-        // Final received — detach to avoid leaking listeners across
-        // start/stop cycles within the same window lifetime.
-        detachListeners();
-        void logInfo(`[stream] sessionRef cleared (was ${sessionId.slice(0, 8)}…)`);
-        sessionRef.current = null;
-      });
-      const errorUnlisten = await listen<ErrorPayload>('transcribe-error', (e) => {
-        if (e.payload.sessionId !== sessionId) return;
-        setError(e.payload.error);
-        // Treat errors as terminal — resolve with whatever we have.
-        if (finalResolveRef.current) {
-          finalResolveRef.current(finalRef.current || interimRef.current || '');
-          finalResolveRef.current = null;
-        }
-        detachListeners();
-        void logInfo(`[stream] sessionRef cleared (was ${sessionId.slice(0, 8)}…)`);
-        sessionRef.current = null;
-      });
-      unlistenersRef.current = [partialUnlisten, finalUnlisten, errorUnlisten];
-
-      // Wire MediaRecorder → Rust chunk stream.
-      const supported = MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'audio/webm';
-      void logInfo(`[stream] MediaRecorder mimeRequested="${mimeType}" mimeUsed="${supported}"`);
-      const rec = new MediaRecorder(stream, { mimeType: supported });
-      recorderRef.current = rec;
-      let chunkCount = 0;
-      let chunkBytes = 0;
-      rec.ondataavailable = async (e) => {
-        chunkCount++;
-        chunkBytes += e.data?.size ?? 0;
-        // Log every 4th chunk so we don't spam, plus the first.
-        if (chunkCount === 1 || chunkCount % 4 === 0) {
-          void logInfo(
-            `[stream] ondataavailable #${chunkCount} size=${e.data?.size ?? 0} totalBytes=${chunkBytes}`,
-          );
-        }
-        if (!e.data || e.data.size === 0) return;
-        // Use the closure-captured sessionId, NOT sessionRef.current — the
-        // ref appeared null at chunk-fire time in observed runs even though
-        // we set it before MediaRecorder.start(), almost certainly a React
-        // strict-mode-style re-execution of the start callback. The local
-        // const is unambiguous: it's the id this MediaRecorder was wired
-        // to. If a future stop / final / error has nulled out the recorder
-        // we'll see invoke fail with "unknown session" which is logged.
-        const sid = sessionId;
-        try {
-          const buf = new Uint8Array(await e.data.arrayBuffer());
-          // Tauri serialises Vec<u8> as a number array; ArrayBuffer-style
-          // transfer goes through `Array.from` here. The cost is negligible
-          // for 250ms / ~3-5KB Opus frames.
-          await invoke('push_audio_chunk', {
-            sessionId: sid,
-            chunk: Array.from(buf),
-          });
-        } catch (err) {
-          void logError(`[stream] push_audio_chunk failed: ${(err as Error).message ?? err}`);
-        }
-      };
-      rec.onstop = () => {
-        teardownAudio();
-        setRecording(false);
-        // Listeners stay attached briefly so the trailing `final` SSE event
-        // still resolves stop()'s promise. They're torn down on session
-        // completion / error / unmount.
-      };
-      rec.onerror = (ev) => {
-        const message =
-          (ev as unknown as { error?: { message?: string } }).error?.message ?? 'record error';
-        void logError(`[stream] MediaRecorder onerror: ${message}`);
-        setError(message);
-        teardownAudio();
-        setRecording(false);
-        if (finalResolveRef.current) {
-          finalResolveRef.current(interimRef.current || finalRef.current || '');
-          finalResolveRef.current = null;
-        }
-      };
-
-      startedAtRef.current = performance.now();
-      silenceStartRef.current = null;
-      void logInfo('[stream] MediaRecorder.start(250)');
-      rec.start(250);
-      setRecording(true);
-      rafRef.current = requestAnimationFrame(tickAnalyser);
-      return true;
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [reset, teardownAudio, tickAnalyser],
+    [reset],
   );
 
-  // Detach listeners + drop any in-flight stream on unmount.
-  useEffect(() => {
-    return () => {
-      const sid = sessionRef.current;
-      if (sid) {
-        invoke('stop_transcription_stream', { sessionId: sid }).catch(() => {});
-      }
-      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-        try {
-          recorderRef.current.stop();
-        } catch {
-          // already stopped
-        }
-      }
-      teardownAudio();
-      detachListeners();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return { recording, interim, finalText, level, error, start, stop, reset };
+  return {
+    recording,
+    interim,
+    finalText,
+    level: 0,
+    error,
+    start,
+    stop,
+    reset,
+  };
 }

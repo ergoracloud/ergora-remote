@@ -278,6 +278,7 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
         return false;
       }
       sessionRef.current = sessionId;
+      void logInfo(`[stream] sessionRef set to ${sessionId.slice(0, 8)}…`);
 
       // Listen for partial / final events scoped to this session.
       const partialUnlisten = await listen<PartialPayload>('transcribe-partial', (e) => {
@@ -295,6 +296,7 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
         // Final received — detach to avoid leaking listeners across
         // start/stop cycles within the same window lifetime.
         detachListeners();
+        void logInfo(`[stream] sessionRef cleared (was ${sessionId.slice(0, 8)}…)`);
         sessionRef.current = null;
       });
       const errorUnlisten = await listen<ErrorPayload>('transcribe-error', (e) => {
@@ -306,6 +308,7 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
           finalResolveRef.current = null;
         }
         detachListeners();
+        void logInfo(`[stream] sessionRef cleared (was ${sessionId.slice(0, 8)}…)`);
         sessionRef.current = null;
       });
       unlistenersRef.current = [partialUnlisten, finalUnlisten, errorUnlisten];
@@ -327,11 +330,14 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
           );
         }
         if (!e.data || e.data.size === 0) return;
-        const sid = sessionRef.current;
-        if (!sid) {
-          void logError('[stream] chunk dropped — no sessionRef set');
-          return;
-        }
+        // Use the closure-captured sessionId, NOT sessionRef.current — the
+        // ref appeared null at chunk-fire time in observed runs even though
+        // we set it before MediaRecorder.start(), almost certainly a React
+        // strict-mode-style re-execution of the start callback. The local
+        // const is unambiguous: it's the id this MediaRecorder was wired
+        // to. If a future stop / final / error has nulled out the recorder
+        // we'll see invoke fail with "unknown session" which is logged.
+        const sid = sessionId;
         try {
           const buf = new Uint8Array(await e.data.arrayBuffer());
           // Tauri serialises Vec<u8> as a number array; ArrayBuffer-style

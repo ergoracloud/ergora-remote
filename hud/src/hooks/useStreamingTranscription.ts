@@ -142,12 +142,33 @@ export function useStreamingTranscription(_opts: StreamingOptions = {}): Streami
         rec.onerror = (e) => {
           const code = e?.error ?? 'unknown';
           void logError(`[stream] SpeechRecognition error: ${code}`);
+
+          // Soft errors that don't end the session — just record + continue.
+          if (code === 'no-speech') return;
+
+          // Everything else is terminal. WKWebView doesn't reliably fire
+          // `onend` after `onerror` on macOS, so we have to do the teardown
+          // ourselves or the UI stays stuck in "Listening…" with dead
+          // buttons.
           if (code === 'not-allowed' || code === 'service-not-allowed') {
-            setError('Microphone permission denied.');
-          } else if (code === 'no-speech') {
-            // Soft — user just hadn't said anything yet.
+            setError(
+              'Permission denied. Open System Settings → Privacy & Security → Speech Recognition and turn on Ergora Remote (also check Microphone).',
+            );
           } else if (code !== 'aborted') {
-            setError('Speech recognition error.');
+            setError(`Speech recognition error: ${code}`);
+          }
+
+          // Hard teardown.
+          try {
+            rec.abort();
+          } catch {
+            /* already gone */
+          }
+          recognitionRef.current = null;
+          setRecording(false);
+          if (finalResolveRef.current) {
+            finalResolveRef.current(latestRef.current);
+            finalResolveRef.current = null;
           }
         };
 

@@ -2,10 +2,11 @@
 //
 // Responsibilities:
 //   • Own the borderless / transparent / always-on-top top-bar window.
-//   • Register the global hotkey (Cmd/Ctrl+Alt+Space) and toggle the HUD.
-//     Was Cmd+Shift+Space — collides with Spotlight/Siri on some macOS
-//     setups. Alt-modified Space is the next-most-discoverable combo that
-//     macOS doesn't bind by default.
+//   • Register the global hotkey (Cmd/Ctrl+Shift+E) and toggle the HUD.
+//     Was Cmd+Shift+Space — collided with Siri / system search on some
+//     setups. Tried Cmd+Opt+Space next — turned out to be the Finder
+//     "Show Search" shortcut. Cmd+Shift+E is mnemonic (E for Ergora) and
+//     has no default macOS binding. User can reassign in HUD Settings.
 //   • Position the HUD on the monitor where the cursor currently is, snapped
 //     to the top edge.
 //   • Expose a small command surface (toggle, hide, position) to the JS side.
@@ -449,9 +450,9 @@ fn raise_to_floating_level<R: Runtime>(window: &WebviewWindow<R>) {
 
 fn default_accelerator() -> &'static str {
     if cfg!(target_os = "macos") {
-        "CmdOrCtrl+Shift+Space"
+        "CmdOrCtrl+Shift+E"
     } else {
-        "Ctrl+Shift+Space"
+        "Ctrl+Shift+E"
     }
 }
 
@@ -558,11 +559,11 @@ pub fn run() {
             // `set_global_hotkey`.
             let accel = Shortcut::new(
                 Some(if cfg!(target_os = "macos") {
-                    Modifiers::SUPER | Modifiers::ALT
+                    Modifiers::SUPER | Modifiers::SHIFT
                 } else {
-                    Modifiers::CONTROL | Modifiers::ALT
+                    Modifiers::CONTROL | Modifiers::SHIFT
                 }),
-                Code::Space,
+                Code::KeyE,
             );
             if let Err(err) = app.global_shortcut().register(accel) {
                 log::error!(

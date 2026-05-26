@@ -279,11 +279,11 @@ export default function App() {
   // window is visible.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Cmd/Ctrl+Alt+Space inside the webview as a fallback for the global
+      // Cmd/Ctrl+Shift+E inside the webview as a fallback for the global
       // hotkey (the global handler is registered Rust-side via
       // tauri-plugin-global-shortcut and is the primary path).
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.altKey && e.code === 'Space') {
+      if (mod && e.shiftKey && e.code === 'KeyE') {
         e.preventDefault();
         if (mode === 'mic') {
           void toggleRecording();

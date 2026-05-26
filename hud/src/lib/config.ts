@@ -166,8 +166,8 @@ export interface UserPrefs {
 
 export const DEFAULT_PREFS: UserPrefs = {
   hotkey: navigator.platform.toUpperCase().includes('MAC')
-    ? 'CmdOrCtrl+Alt+Space'
-    : 'Ctrl+Alt+Space',
+    ? 'CmdOrCtrl+Shift+E'
+    : 'Ctrl+Shift+E',
   ttsEnabled: true,
   projectId: '',
 };

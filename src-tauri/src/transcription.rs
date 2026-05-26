@@ -317,13 +317,26 @@ fn handle_sse_frame<R: Runtime>(app: &AppHandle<R>, session_id: &str, frame: &st
         }
     }
     let data_joined = data_lines.join("\n");
-    let text = extract_text(&data_joined).unwrap_or_default();
 
+    // Only forward events we actually understand. Previously the catch-all
+    // forwarded everything (including the `open` handshake from
+    // /api/transcribe/stream that carries `{"sampleRate":48000,...}`) as a
+    // partial transcript, which surfaced raw JSON in the HUD bar.
     let event_name = match event_type {
         "interim" | "partial" => "transcribe-partial",
         "final" => "transcribe-final",
         "error" => "transcribe-error",
-        _ => "transcribe-partial",
+        // open / ping / anything-else — log + drop, don't emit to JS.
+        other => {
+            log::debug!("[sse] ignoring non-transcript event '{}'", other);
+            return;
+        }
+    };
+
+    // Even for known events, only emit when we can pull a real text field
+    // out — never forward raw JSON bodies as transcript content.
+    let Some(text) = extract_text(&data_joined) else {
+        return;
     };
 
     let payload = TranscribeEvent {
@@ -342,13 +355,22 @@ fn extract_text(data: &str) -> Option<String> {
         return None;
     }
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        // Recognised shapes: {"text": "..."}, {"message": "..."} (error), or
+        // a bare JSON string. Anything else (e.g. the open-handshake
+        // {"sampleRate":48000,...}) gets dropped — we don't want to surface
+        // raw event metadata as if it were a transcript.
         if let Some(s) = json.get("text").and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+        if let Some(s) = json.get("message").and_then(|v| v.as_str()) {
             return Some(s.to_string());
         }
         if let Some(s) = json.as_str() {
             return Some(s.to_string());
         }
+        return None;
     }
+    // Plain (non-JSON) string body — accept verbatim.
     Some(trimmed.to_string())
 }
 

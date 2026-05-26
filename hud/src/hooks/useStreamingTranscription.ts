@@ -27,6 +27,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
 import type { ErgoraConfig } from '../lib/config';
+import { transcribe } from '../lib/api';
 
 export interface StreamingOptions {
   /** Kept for API compat — no longer enforced; the browser SR engine
@@ -84,6 +85,15 @@ export function useStreamingTranscription(_opts: StreamingOptions = {}): Streami
   const latestRef = useRef<string>(''); // running combined transcript
   const finalResolveRef = useRef<((v: string) => void) | null>(null);
 
+  // MediaRecorder fallback state (Linux/Windows where webkitSpeechRecognition
+  // is unavailable). We accumulate chunks while recording and POST the whole
+  // blob to /api/transcribe on stop. No interim words, just final text.
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const fallbackResolveRef = useRef<((v: string) => void) | null>(null);
+  const fallbackCfgRef = useRef<ErgoraConfig | null>(null);
+
   const reset = useCallback(() => {
     setInterim('');
     setFinalText('');
@@ -91,34 +101,152 @@ export function useStreamingTranscription(_opts: StreamingOptions = {}): Streami
     latestRef.current = '';
   }, []);
 
-  const stop = useCallback(async (): Promise<string> => {
-    const rec = recognitionRef.current;
-    if (!rec) {
-      // Nothing to stop — return what we have.
+  const stopFallback = useCallback(async (): Promise<string> => {
+    const mr = recorderRef.current;
+    if (!mr || mr.state === 'inactive') {
+      // Nothing recording — return whatever we already produced.
       return latestRef.current;
     }
     return new Promise<string>((resolve) => {
-      finalResolveRef.current = resolve;
-      // .stop() lets the final result fire one last `onresult` and then
-      // `onend`. .abort() would drop the last partial. We want the last word.
-      try {
-        rec.stop();
-      } catch {
-        // Already stopped — resolve with current text.
-        resolve(latestRef.current);
-        finalResolveRef.current = null;
-      }
+      fallbackResolveRef.current = resolve;
+      mr.stop(); // triggers ondataavailable + onstop below
     });
   }, []);
 
+  const stop = useCallback(async (): Promise<string> => {
+    // SpeechRecognition path
+    const rec = recognitionRef.current;
+    if (rec) {
+      return new Promise<string>((resolve) => {
+        finalResolveRef.current = resolve;
+        // .stop() lets the final result fire one last `onresult` and then
+        // `onend`. .abort() would drop the last partial. We want the last word.
+        try {
+          rec.stop();
+        } catch {
+          resolve(latestRef.current);
+          finalResolveRef.current = null;
+        }
+      });
+    }
+    // MediaRecorder fallback path
+    if (recorderRef.current) {
+      return stopFallback();
+    }
+    // Nothing to stop — return what we have.
+    return latestRef.current;
+  }, [stopFallback]);
+
+  const startFallback = useCallback(
+    async (cfg: ErgoraConfig): Promise<boolean> => {
+      void logInfo('[stream] webkitSpeechRecognition unavailable — using MediaRecorder fallback');
+      fallbackCfgRef.current = cfg;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        streamRef.current = stream;
+
+        const mime = (() => {
+          if (typeof MediaRecorder === 'undefined') return undefined;
+          if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus'))
+            return 'audio/webm;codecs=opus';
+          if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
+          if (MediaRecorder.isTypeSupported('audio/mp4')) return 'audio/mp4';
+          return undefined;
+        })();
+        const mr = mime
+          ? new MediaRecorder(stream, { mimeType: mime })
+          : new MediaRecorder(stream);
+        recorderRef.current = mr;
+        chunksRef.current = [];
+
+        mr.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+        };
+        mr.onerror = (ev) => {
+          const message =
+            (ev as unknown as { error?: { message?: string } }).error?.message ??
+            'record error';
+          void logError(`[stream:fallback] MediaRecorder error: ${message}`);
+          setError(message);
+          setRecording(false);
+          streamRef.current?.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+          recorderRef.current = null;
+          if (fallbackResolveRef.current) {
+            fallbackResolveRef.current('');
+            fallbackResolveRef.current = null;
+          }
+        };
+        mr.onstop = async () => {
+          streamRef.current?.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+          const blob = new Blob(chunksRef.current, {
+            type: mr.mimeType || 'audio/webm',
+          });
+          chunksRef.current = [];
+          recorderRef.current = null;
+          setRecording(false);
+          const usedCfg = fallbackCfgRef.current;
+          fallbackCfgRef.current = null;
+          if (!usedCfg || blob.size === 0) {
+            const result = latestRef.current;
+            if (fallbackResolveRef.current) {
+              fallbackResolveRef.current(result);
+              fallbackResolveRef.current = null;
+            }
+            return;
+          }
+          void logInfo(`[stream:fallback] posting ${blob.size} bytes to /api/transcribe`);
+          try {
+            const r = await transcribe(usedCfg, blob);
+            const text = r.text || '';
+            latestRef.current = text;
+            setFinalText(text);
+            if (fallbackResolveRef.current) {
+              fallbackResolveRef.current(text);
+              fallbackResolveRef.current = null;
+            }
+          } catch (err) {
+            const msg = (err as Error).message ?? String(err);
+            void logError(`[stream:fallback] /api/transcribe failed: ${msg}`);
+            setError(msg);
+            if (fallbackResolveRef.current) {
+              fallbackResolveRef.current('');
+              fallbackResolveRef.current = null;
+            }
+          }
+        };
+
+        // Single timeslice — no interim transcripts, we just want one blob on stop.
+        mr.start();
+        setRecording(true);
+        return true;
+      } catch (err) {
+        const msg = (err as Error).message ?? String(err);
+        void logError(`[stream:fallback] start failed: ${msg}`);
+        setError(msg);
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        return false;
+      }
+    },
+    [],
+  );
+
   const start = useCallback(
-    async (_cfg: ErgoraConfig): Promise<boolean> => {
+    async (cfg: ErgoraConfig): Promise<boolean> => {
       reset();
       const SRCtor = getSRCtor();
+      // Linux (webkit2gtk) and most WebView2 builds don't expose
+      // webkitSpeechRecognition — fall back to record-blob → /api/transcribe.
       if (!SRCtor) {
-        void logError('[stream] SpeechRecognition not available in this webview');
-        setError('Speech recognition not available.');
-        return false;
+        return startFallback(cfg);
       }
       try {
         const rec = new SRCtor();
@@ -196,7 +324,7 @@ export function useStreamingTranscription(_opts: StreamingOptions = {}): Streami
         return false;
       }
     },
-    [reset],
+    [reset, startFallback],
   );
 
   return {

@@ -259,6 +259,12 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
 
       // Open the Rust streaming session. If this fails (e.g. cloud
       // unreachable), bail out — caller falls back to whole-blob transcribe.
+      void logInfo(
+        `[stream] invoke start_transcription_stream — apiUrl="${cfg.apiUrl}" ` +
+          `tokenLen=${(cfg.agentToken ?? '').length} ` +
+          `tokenPrefix="${(cfg.agentToken ?? '').slice(0, 8)}" ` +
+          `tokenTail="${(cfg.agentToken ?? '').slice(-6)}"`,
+      );
       let sessionId: string;
       try {
         sessionId = await invoke<string>('start_transcription_stream', {

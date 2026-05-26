@@ -73,6 +73,68 @@ fn hud_dimensions(state: &str) -> (f64, f64) {
     }
 }
 
+/// Read `~/.ergora-remote/.env` from Rust and return the parsed agent
+/// config as a JSON object the JS side can consume. We do this in Rust
+/// because the `tauri-plugin-fs` `home-read` scope silently excludes
+/// hidden directories (anything starting with `.`), and our config dir
+/// is `~/.ergora-remote/` — so the JS-side reader returned nothing every
+/// time, which left `cfg.agentToken` empty and every streaming POST
+/// produced `Bearer ` with no token. std::fs has no scope check.
+#[derive(serde::Serialize, Default)]
+struct AgentConfigOut {
+    agent_token: String,
+    api_url: String,
+    project_id: Option<String>,
+    /// True if the .env file exists and parsed at all. False = file
+    /// missing or unreadable, so the HUD should show the sign-in surface.
+    present: bool,
+}
+
+#[tauri::command]
+fn read_agent_config() -> Result<AgentConfigOut, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let env_path = std::path::PathBuf::from(home).join(".ergora-remote/.env");
+    let text = match std::fs::read_to_string(&env_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(AgentConfigOut::default()), // file not present yet
+    };
+
+    let mut out = AgentConfigOut {
+        api_url: "https://ergora.cloud".into(),
+        present: true,
+        ..Default::default()
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        let mut val = line[eq + 1..].trim().to_string();
+        if (val.starts_with('"') && val.ends_with('"'))
+            || (val.starts_with('\'') && val.ends_with('\''))
+        {
+            val = val[1..val.len() - 1].to_string();
+        }
+        match key {
+            "ERGORA_AGENT_TOKEN" => out.agent_token = val,
+            "ERGORA_API_URL" => {
+                if !val.is_empty() {
+                    out.api_url = val;
+                }
+            }
+            "ERGORA_PROJECT_ID" => {
+                if !val.is_empty() {
+                    out.project_id = Some(val);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// Persist an `eal_…` agent token to `~/.ergora-remote/.env` from Rust.
 ///
 /// Called by the deep-link handler when a `ergora-remote://pair?token=…`
@@ -431,6 +493,7 @@ pub fn run() {
             set_hud_expanded,
             recenter_hud,
             set_global_hotkey,
+            read_agent_config,
             start_transcription_stream,
             push_audio_chunk,
             stop_transcription_stream,

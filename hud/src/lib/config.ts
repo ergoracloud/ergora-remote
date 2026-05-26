@@ -8,6 +8,7 @@
 
 import { exists, readTextFile, writeTextFile, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { homeDir, join } from '@tauri-apps/api/path';
+import { invoke } from '@tauri-apps/api/core';
 
 export interface ErgoraConfig {
   agentToken: string;
@@ -25,27 +26,11 @@ export interface ConfigStatus {
 
 const DEFAULT_API = 'https://ergora.cloud';
 
-function parseEnv(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const eq = line.indexOf('=');
-    if (eq === -1) continue;
-    const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    out[key] = val;
-  }
-  return out;
-}
-
-async function envPath(): Promise<string> {
-  const home = await homeDir();
-  return join(home, '.ergora-remote', '.env');
-}
+// (parseEnv + envPath used to live here for the JS-side .env reader. The
+// fs plugin can't see hidden directories, so the read was moved into the
+// Rust `read_agent_config` command. saveAgentToken below still writes the
+// .env file from JS — that path uses `write_text_file` which has a more
+// permissive scope than `home-read`.)
 
 async function statePath(): Promise<string> {
   const home = await homeDir();
@@ -72,18 +57,33 @@ export async function loadConfig(): Promise<ConfigStatus> {
   const config: ErgoraConfig = { agentToken: '', apiUrl: DEFAULT_API };
   const missing: string[] = [];
 
+  // Read the .env from Rust rather than the JS fs plugin: the plugin's
+  // `home-read` scope excludes hidden directories (anything under
+  // `~/.<name>/`), so reading `~/.ergora-remote/.env` from JS silently
+  // returned nothing and left agentToken empty — which is why every
+  // streaming request previously sent `Bearer ` with no token. The Rust
+  // `read_agent_config` command uses std::fs and has no scope check.
   try {
-    const ep = await envPath();
-    if (await exists(ep)) {
-      const env = parseEnv(await readTextFile(ep));
-      config.agentToken = env.ERGORA_AGENT_TOKEN ?? '';
-      config.apiUrl = env.ERGORA_API_URL || DEFAULT_API;
-      config.projectId = env.ERGORA_PROJECT_ID || undefined;
-    } else {
-      missing.push('ERGORA_AGENT_TOKEN');
-    }
+    const out = await invoke<{
+      agentToken?: string;
+      agent_token?: string;
+      apiUrl?: string;
+      api_url?: string;
+      projectId?: string | null;
+      project_id?: string | null;
+      present: boolean;
+    }>('read_agent_config');
+    // The Rust struct uses snake_case via serde default; Tauri's invoke
+    // sometimes camel-cases — accept both shapes defensively.
+    const token = out.agentToken ?? out.agent_token ?? '';
+    const url = out.apiUrl ?? out.api_url ?? '';
+    const pid = (out.projectId ?? out.project_id ?? null) || undefined;
+    config.agentToken = token;
+    if (url) config.apiUrl = url;
+    if (pid) config.projectId = pid;
+    if (!out.present) missing.push('ERGORA_AGENT_TOKEN');
   } catch (err) {
-    console.error('[config] failed reading .env', err);
+    console.error('[config] read_agent_config invoke failed', err);
     missing.push('ERGORA_AGENT_TOKEN');
   }
 

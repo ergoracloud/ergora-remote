@@ -138,13 +138,16 @@ pub async fn push_audio_chunk(
     session_id: String,
     chunk: Vec<u8>,
 ) -> Result<(), String> {
+    let len = chunk.len();
     let tx = {
         let map = state.sessions.lock().map_err(poisoned)?;
         let Some(session) = map.get(&session_id) else {
+            log::warn!("[push_audio_chunk] no session for {} ({} bytes dropped)", session_id, len);
             return Err(format!("unknown session {}", session_id));
         };
         session.chunk_tx.clone()
     };
+    log::debug!("[push_audio_chunk] {} bytes to session {}", len, &session_id[..8.min(session_id.len())]);
     tx.send(bytes::Bytes::from(chunk))
         .await
         .map_err(|e| format!("audio channel closed: {}", e))?;

@@ -312,12 +312,26 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
 
       // Wire MediaRecorder → Rust chunk stream.
       const supported = MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'audio/webm';
+      void logInfo(`[stream] MediaRecorder mimeRequested="${mimeType}" mimeUsed="${supported}"`);
       const rec = new MediaRecorder(stream, { mimeType: supported });
       recorderRef.current = rec;
+      let chunkCount = 0;
+      let chunkBytes = 0;
       rec.ondataavailable = async (e) => {
+        chunkCount++;
+        chunkBytes += e.data?.size ?? 0;
+        // Log every 4th chunk so we don't spam, plus the first.
+        if (chunkCount === 1 || chunkCount % 4 === 0) {
+          void logInfo(
+            `[stream] ondataavailable #${chunkCount} size=${e.data?.size ?? 0} totalBytes=${chunkBytes}`,
+          );
+        }
         if (!e.data || e.data.size === 0) return;
         const sid = sessionRef.current;
-        if (!sid) return;
+        if (!sid) {
+          void logError('[stream] chunk dropped — no sessionRef set');
+          return;
+        }
         try {
           const buf = new Uint8Array(await e.data.arrayBuffer());
           // Tauri serialises Vec<u8> as a number array; ArrayBuffer-style
@@ -328,7 +342,7 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
             chunk: Array.from(buf),
           });
         } catch (err) {
-          console.warn('[stream] chunk push failed', err);
+          void logError(`[stream] push_audio_chunk failed: ${(err as Error).message ?? err}`);
         }
       };
       rec.onstop = () => {
@@ -341,6 +355,7 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
       rec.onerror = (ev) => {
         const message =
           (ev as unknown as { error?: { message?: string } }).error?.message ?? 'record error';
+        void logError(`[stream] MediaRecorder onerror: ${message}`);
         setError(message);
         teardownAudio();
         setRecording(false);
@@ -352,6 +367,7 @@ export function useStreamingTranscription(opts: StreamingOptions = {}): Streamin
 
       startedAtRef.current = performance.now();
       silenceStartRef.current = null;
+      void logInfo('[stream] MediaRecorder.start(250)');
       rec.start(250);
       setRecording(true);
       rafRef.current = requestAnimationFrame(tickAnalyser);

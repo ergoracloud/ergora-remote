@@ -2,7 +2,10 @@
 //
 // Responsibilities:
 //   • Own the borderless / transparent / always-on-top top-bar window.
-//   • Register the global hotkey (Cmd/Ctrl+Shift+Space) and toggle the HUD.
+//   • Register the global hotkey (Cmd/Ctrl+Alt+Space) and toggle the HUD.
+//     Was Cmd+Shift+Space — collides with Spotlight/Siri on some macOS
+//     setups. Alt-modified Space is the next-most-discoverable combo that
+//     macOS doesn't bind by default.
 //   • Position the HUD on the monitor where the cursor currently is, snapped
 //     to the top edge.
 //   • Expose a small command surface (toggle, hide, position) to the JS side.
@@ -555,9 +558,9 @@ pub fn run() {
             // `set_global_hotkey`.
             let accel = Shortcut::new(
                 Some(if cfg!(target_os = "macos") {
-                    Modifiers::SUPER | Modifiers::SHIFT
+                    Modifiers::SUPER | Modifiers::ALT
                 } else {
-                    Modifiers::CONTROL | Modifiers::SHIFT
+                    Modifiers::CONTROL | Modifiers::ALT
                 }),
                 Code::Space,
             );

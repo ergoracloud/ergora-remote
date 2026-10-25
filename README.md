@@ -1,11 +1,21 @@
 # Ergora Remote — local agent
 
+> **Status: paused.** Ergora Remote is on hold and isn't generally available
+> yet. This repository stays public so you can read exactly what the agent
+> would run on your machine, but the steps below are not a supported release
+> and may change before launch. To hear when it ships, join the waitlist at
+> [ergora.app/remote](https://ergora.app/remote).
+
 A small background process that runs on your Mac, Windows PC, or Linux
 machine, bridging your device to your [Ergora](https://ergora.cloud) workspace.
 
-**Your files never leave your machine.** Ergora's cloud tells the agent
-what to look for; the agent does the work locally and only sends back the
-result.
+**It only works inside the folders you choose, but it isn't offline.** To
+answer a request, the agent sends the request and the contents of any files it
+reads to Anthropic's API (Claude), using your own API key. The answer goes back
+to your Ergora workspace, along with the names, paths and sizes of files that
+are added, changed or deleted in those folders.
+[What leaves your machine](#what-leaves-your-machine) lists exactly what is
+sent, and where.
 
 ---
 
@@ -31,16 +41,41 @@ Full step-by-step guide with platform-specific screenshots:
 
 ## What the agent can do
 
-- **Watch folders** you choose for new/changed files (via `MOUNTED_PATHS` in `.env`)
-- **Answer questions about local files** asked by your cloud Intern (e.g. "find the Acme contract")
-- **Run commands** inside mounted folders if you grant write mode
-- **Stay online through sleep/wake** on macOS and Windows — your intern can always reach it
+- **Watch folders** you choose for new, changed and deleted files (via `MOUNTED_PATHS` in `.env`) and keep your Ergora workspace's file index up to date: names, paths and sizes, not contents
+- **Answer questions about local files** asked by your cloud Intern (e.g. "find the Acme contract"), using Claude with your own Anthropic API key
+- **Pick up again after sleep/wake** — it checks in with Ergora every few seconds rather than holding a connection open, so there is nothing to drop. It can't answer while your machine is asleep or switched off.
 
 ## What it won't do
 
 - Read files outside the folders you list in `MOUNTED_PATHS`
-- Upload raw files to Ergora's cloud (file contents stay local; only query results are transmitted)
-- Persist once you uninstall — `rm -rf ~/ergora-remote` and revoke the token from the portal
+- Change, move or delete your files, or run commands: its tools can only find, list and read files
+- Upload whole files to Ergora's cloud. Ergora receives file names, paths and sizes, plus the agent's answers, which can quote or summarise what it read. The contents of files the agent reads do go to Anthropic's API (see [What leaves your machine](#what-leaves-your-machine))
+- Persist once you uninstall — `rm -rf ~/ergora-remote ~/.ergora-remote` (and `pm2 delete ergora-remote && pm2 save` if you set up pm2), then revoke the token from the portal
+
+## What leaves your machine
+
+The agent does its work on your machine, but answering a request means sending
+data to two services.
+
+**Anthropic's API (Claude)**, called directly from your machine with your own
+`ANTHROPIC_API_KEY`, each time your Intern sends the agent a request:
+
+- The request, plus any context your Ergora workspace attached to it
+- Your device name, platform and list of `MOUNTED_PATHS` (part of the agent's instructions to Claude)
+- The result of every tool call the agent makes: the files it finds and folder listings (names, paths, sizes and modified times), and up to the first 50 KB of each file it reads (files over 10 MB are refused)
+
+Anthropic handles this data under the terms of your own Anthropic API account.
+
+**Ergora's cloud (`ergora.cloud`)**, while the agent is running:
+
+- At start-up: a random device ID, your device name (your computer's hostname unless you set `DEVICE_NAME`), platform, agent version, the list of `MOUNTED_PATHS`, and the device role, tag and label if you set them
+- Every 3 seconds: a heartbeat with your device ID, which is also how the agent picks up new requests (while a new device waits for approval, a status check every 5 seconds instead)
+- A few seconds after a file is added, changed or deleted in a mounted folder: its path, name, extension, size, the time of the change and whether it looks like a text file (for a deleted file, just its path). Never its contents. Dotfiles, `node_modules` and `.git` are skipped
+- After each request: the agent's final answer, which can quote or summarise files it read, and the names of the tools it used, or the error message if the request failed
+
+The agent makes no other network calls. Your `ANTHROPIC_API_KEY` is only ever
+sent to Anthropic, and your `ERGORA_AGENT_TOKEN` only to Ergora (or the
+`ERGORA_API_URL` you set).
 
 ---
 
@@ -50,7 +85,7 @@ Full step-by-step guide with platform-specific screenshots:
 
 ```
 ERGORA_AGENT_TOKEN=eal_...           # Required. From portal → Ergora Remote → Generate token.
-ANTHROPIC_API_KEY=sk-ant-...         # Required only if using BYOK-Claude mode.
+ANTHROPIC_API_KEY=sk-ant-...         # Required. The agent calls Claude directly with your key.
 MOUNTED_PATHS=/Users/you/Documents,/Users/you/Code
 ERGORA_API_URL=https://ergora.cloud  # Default. Override only for self-hosted.
 ```
@@ -130,11 +165,11 @@ Output lands in `src-tauri/target/release/bundle/`.
 
 ### What it does
 
-- **Mic mode** (default) — circular mic button, animated pulse, VAD-light auto-stop after ~1.2s of silence. Audio is `webm/opus`, posted to `/api/transcribe`.
+- **Mic mode** (default) — circular mic button, animated pulse, VAD-light auto-stop after ~1.2s of silence. Audio is `webm/opus`, streamed to `/api/transcribe/stream` for live transcripts, falling back to a single upload to `/api/transcribe`.
 - **Keyboard mode** — keyboard icon swap; auto-focused text input; Enter submits.
 - **Intent dispatch** — transcript or typed text is POSTed to `/api/voice`. The five intents (`find-file`, `capture-to-brain`, `open-tool`, `run-task`, `chat`) each render their own result UI inside the expanded HUD panel.
 - **TTS** — chat replies are spoken via `/api/tts` (toggleable in settings).
-- **Privacy** — no always-on listening. Audio leaves the machine only when you trigger the HUD. A 50-entry local ring buffer of prompts is kept in the encrypted Tauri app data dir; nothing about the HUD's history syncs to the cloud.
+- **Privacy** — no always-on listening. Audio leaves the machine only when you trigger the HUD: it goes to Ergora's cloud, which uses a third-party speech-to-text service to transcribe it. The text you speak or type is then sent to Ergora's cloud to be answered, and, unless you turn off "Speak chat replies aloud", chat replies are sent to `/api/tts` to be read out. The HUD keeps your last 50 prompts (and, for chat, the reply) in `hud-history.json` in its app data folder (`~/Library/Application Support/cloud.ergora.hud` on macOS, `%APPDATA%\cloud.ergora.hud` on Windows, `~/.local/share/cloud.ergora.hud` on Linux). That file is plain, unencrypted JSON, protected only by your user account's file permissions and any disk encryption you've turned on (such as FileVault, BitLocker or LUKS). The HUD never uploads the file itself, but every prompt in it has already been sent to Ergora's cloud to be answered.
 - **Multi-monitor** — appears on the monitor where the cursor currently is.
 - **Esc / blur** — dismisses (hides, doesn't quit). Hotkey toggles visibility.
 
@@ -159,14 +194,16 @@ User prefs persist to the Tauri app data dir (`hud-prefs.json`).
 
 ## Security
 
-- Every line of code that runs on your machine is in this repo. You can
-  audit what it does before installing.
-- The agent authenticates to Ergora with an HMAC-hashed `eal_*` token
-  stored only in your local `.env` — never committed, never uploaded.
-- All traffic to ergora.cloud is TLS.
+- Every line of Ergora code that runs on your machine is in this repo, so you
+  can audit what it does before installing. Third-party packages are pinned in
+  `package-lock.json`, `hud/package-lock.json` and `src-tauri/Cargo.lock`.
+- The agent authenticates to Ergora with an `eal_*` token kept in your local
+  `.env` (which is git-ignored). The token is sent only to Ergora, to
+  authenticate each request, and Ergora stores only an HMAC-SHA256 hash of it.
+- All traffic to ergora.cloud and to Anthropic's API is TLS.
 - No inbound listeners — the agent only makes outbound HTTP calls.
 - Revoke access at any time: portal → Ergora Remote → rotate token, and/or
-  `rm -rf ~/ergora-remote`.
+  `rm -rf ~/ergora-remote ~/.ergora-remote`.
 
 Found a security issue? Email security@ergora.cloud. We'll reply within
 one business day.

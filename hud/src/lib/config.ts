@@ -1,10 +1,13 @@
 // Config loader for the HUD.
 //
-// The desktop client (headless agent) reads its credentials from
-// ~/.ergora-remote/.env (see ../../src/config.ts on the Node side). The HUD
-// reuses that file so the user only configures Ergora Remote once. We parse
-// the .env manually rather than importing a node-only dotenv lib — this code
-// runs inside the Tauri webview.
+// The HUD reads its credentials from ~/.ergora-remote/.env. That is not the
+// file the headless agent loads: ../../src/config.ts calls dotenv.config(),
+// which reads .env from the agent's working directory (~/ergora-remote/.env
+// in the installer's layout). Until the two are unified, ERGORA_AGENT_TOKEN
+// has to be set in both. Device identity is shared through
+// ~/.ergora-remote/state.json, which the agent writes. We parse the .env
+// manually rather than importing a node-only dotenv lib — this code runs
+// inside the Tauri webview.
 
 import { exists, readTextFile, writeTextFile, mkdir, BaseDirectory } from '@tauri-apps/plugin-fs';
 import { homeDir, join } from '@tauri-apps/api/path';
@@ -107,8 +110,8 @@ export async function loadConfig(): Promise<ConfigStatus> {
 }
 
 /// Save user-tunable preferences (hotkey, TTS toggle, project) to the Tauri
-/// app data dir. We deliberately do NOT touch ~/.ergora-remote/.env from the
-/// HUD — the headless agent owns that file.
+/// app data dir. We deliberately never write to ~/.ergora-remote/.env from the
+/// HUD: the user edits that file by hand.
 export interface UserPrefs {
   hotkey: string;
   ttsEnabled: boolean;

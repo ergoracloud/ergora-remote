@@ -13,7 +13,7 @@
 // This is the cross-platform path. macOS could in principle drive
 // `SFSpeechRecognizer` directly for a zero-network alternative; we ship the
 // cloud path here because (a) the server endpoint is already deployed and (b)
-// Whisper-on-cloud beats on-device tiny models for accuracy. The same
+// cloud speech-to-text beats on-device tiny models for accuracy. The same
 // front-end events drive the UI either way, so a future native-STT module can
 // slot in behind the same `start_transcription_stream` command without any
 // React changes.

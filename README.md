@@ -50,7 +50,7 @@ Full step-by-step guide with platform-specific screenshots:
 - Read files outside the folders you list in `MOUNTED_PATHS`
 - Change, move or delete your files, or run commands: its tools can only find, list and read files
 - Upload whole files to Ergora's cloud. Ergora receives file names, paths and sizes, plus the agent's answers, which can quote or summarise what it read. The contents of files the agent reads do go to Anthropic's API (see [What leaves your machine](#what-leaves-your-machine))
-- Persist once you uninstall: [Uninstall](#uninstall) lists everything to remove, including the HUD's local history
+- Persist once you uninstall: [Uninstall](#uninstall) lists what to remove, including the HUD's local history
 
 ## What leaves your machine
 
@@ -206,10 +206,15 @@ User prefs persist to the Tauri app data dir (`hud-prefs.json`).
    one, and delete its `cloud.ergora.hud` app data folder. That folder holds
    `hud-history.json` (your last 50 prompts and chat replies, in plain text)
    and `hud-prefs.json`. The path for each platform is in the HUD's
-   [privacy notes](#what-it-does).
+   [privacy notes](#what-it-does). The HUD's logs and webview data are kept
+   in other folders with the same name, which you can delete too: for example
+   `~/Library/Logs/cloud.ergora.hud` and `~/Library/Caches/cloud.ergora.hud`
+   on macOS, or `%LOCALAPPDATA%\cloud.ergora.hud` on Windows.
 4. Revoke the token: in the portal, open Ergora Remote and select
    **Generate token**. The new token replaces the old one, which stops working
-   straight away. You don't need to use the new one.
+   straight away. You don't need to use the new one. The button only appears
+   while your Ergora Remote subscription is active; if yours has ended, email
+   security@ergora.cloud and ask for the token to be revoked.
 
 ---
 
@@ -226,8 +231,10 @@ User prefs persist to the Tauri app data dir (`hud-prefs.json`).
   `ERGORA_API_URL` or `ANTHROPIC_BASE_URL` at a plain `http://` address.
 - No inbound listeners — the agent only makes outbound HTTP calls.
 - Revoke access: in the portal, open Ergora Remote and select
-  **Generate token**, which stops the old token working. To remove the agent
-  and the HUD from your machine as well, follow [Uninstall](#uninstall).
+  **Generate token**, which stops the old token working. If your Ergora
+  Remote subscription has ended, email security@ergora.cloud instead. To
+  remove the agent and the HUD from your machine as well, follow
+  [Uninstall](#uninstall).
 
 Found a security issue? Email security@ergora.cloud. We'll reply within
 one business day.

@@ -4,11 +4,12 @@ name: Publish release tarball
 # uploads it to the Ergora marketing server so the install script keeps
 # pointing at the latest code.
 #
-# Required repo secrets:
-#   ERGORA_VPS_HOST      — e.g. 187.124.209.30
-#   ERGORA_VPS_USER      — usually 'root'
-#   ERGORA_VPS_SSH_KEY   — private SSH key with access to VPS
-#   ERGORA_VPS_PATH      — /docker/ergora-app/public/downloads
+# Required repo secrets. This repo is public: keep real hosts, users and
+# paths in the Actions secrets only, never in this file.
+#   ERGORA_VPS_HOST      — hostname or IP of the server that hosts the downloads
+#   ERGORA_VPS_USER      — SSH user allowed to write to ERGORA_VPS_PATH
+#   ERGORA_VPS_SSH_KEY   — private SSH key for that user
+#   ERGORA_VPS_PATH      — server directory served at https://ergora.app/downloads/
 
 on:
   push:

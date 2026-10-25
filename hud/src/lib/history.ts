@@ -1,6 +1,8 @@
-// Local ring buffer of HUD interactions (last 50). Stored encrypted-at-rest by
-// Tauri's app data dir + OS-level disk encryption — deliberately NOT synced
-// to the cloud (privacy promise).
+// Local ring buffer of HUD interactions (last 50). Plain JSON in
+// BaseDirectory.AppData; the app does not encrypt it, so it is protected only
+// by the user's file permissions and any OS-level disk encryption. Never
+// uploaded, but every prompt in it was already sent to the cloud to be
+// answered. Keep the README's HUD privacy notes in step with this.
 //
 // We use the JSON file approach rather than the keychain so users can audit
 // what's stored.

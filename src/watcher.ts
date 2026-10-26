@@ -1,5 +1,6 @@
 import chokidar, { FSWatcher } from 'chokidar';
 import { config } from './config.js';
+import { displayPath, isInsideMountedPath, locate, mounts } from './tools.js';
 
 export interface FileEvent {
   type: 'add' | 'change' | 'unlink';
@@ -12,6 +13,13 @@ type EventCallback = (event: FileEvent) => void;
 let watcher: FSWatcher | null = null;
 const listeners: EventCallback[] = [];
 
+const IGNORED = [
+  /(^|[/\\])\../,        // dotfiles
+  /node_modules/,
+  /\.git/,
+  /\.DS_Store/,
+];
+
 export function startWatcher() {
   if (watcher) return;
   if (config.mountedPaths.length === 0) {
@@ -21,13 +29,17 @@ export function startWatcher() {
 
   console.log(`[watcher] Watching: ${config.mountedPaths.join(', ')}`);
 
-  watcher = chokidar.watch(config.mountedPaths, {
-    ignored: [
-      /(^|[/\\])\../,        // dotfiles
-      /node_modules/,
-      /\.git/,
-      /\.DS_Store/,
-    ],
+  // Watch each mounted folder at its real location without following the
+  // symlinks inside it, so no event can come from outside a mounted folder.
+  const list = mounts();
+  watcher = chokidar.watch(list.map(m => m.real), {
+    // Apply the ignore rules to the path inside its mounted folder, so a folder
+    // whose real location is under a dot-folder isn't skipped whole.
+    ignored: (p: string) => {
+      const rel = locate(p, list)?.rel ?? p;
+      return IGNORED.some(re => re.test(rel));
+    },
+    followSymlinks: false,
     persistent: true,
     ignoreInitial: true,
     depth: 4,
@@ -35,7 +47,10 @@ export function startWatcher() {
   });
 
   const emit = (type: FileEvent['type']) => (path: string) => {
-    const event: FileEvent = { type, path, timestamp: new Date().toISOString() };
+    // A symlink is reported as itself. Drop one that points outside the
+    // mounted folders.
+    if (!isInsideMountedPath(path, list)) return;
+    const event: FileEvent = { type, path: displayPath(path, list), timestamp: new Date().toISOString() };
     listeners.forEach(fn => fn(event));
   };
 

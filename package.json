@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "test": "tsx --test test/tools.test.ts test/watcher.test.ts",
     "setup": "bash scripts/setup.sh",
     "hud:install": "npm --prefix hud install",
     "hud:dev": "tauri dev --config src-tauri/tauri.conf.json",

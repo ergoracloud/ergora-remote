@@ -6,7 +6,7 @@
 import { config } from './config.js';
 import { FileEvent } from './watcher.js';
 import { extname, basename } from 'path';
-import { statSync } from 'fs';
+import { lstatSync } from 'fs';
 
 const API = (config.apiUrl ?? 'https://ergora.cloud').replace(/\/$/, '');
 const FLUSH_MS = 2000;
@@ -35,8 +35,13 @@ export function enqueueFileEvent(event: FileEvent) {
   if (event.type === 'unlink') {
     queue.push({ type: 'unlink', path: event.path });
   } else {
+    // lstat, and regular files only: never report what a symlink points at.
     let size = 0;
-    try { size = statSync(event.path).size; } catch { return; }
+    try {
+      const stat = lstatSync(event.path);
+      if (!stat.isFile()) return;
+      size = stat.size;
+    } catch { return; }
     const ext = extname(event.path).toLowerCase();
     queue.push({
       type: event.type,
